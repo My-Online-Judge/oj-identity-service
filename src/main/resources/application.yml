@@ -1,0 +1,53 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: identity-service
+  # Serialize any Instant/Date/Calendar JSON in Vietnam time (GMT+7). LocalDateTime fields are naive
+  # and unaffected by this — those are pinned via TimeZone.setDefault in IdentityServiceApplication.main.
+  jackson:
+    time-zone: Asia/Ho_Chi_Minh
+  profiles:
+    active: @spring.profiles.active@
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Local Redis answers in well under a millisecond. Without these, a Redis that stops answering
+      # holds each call (login rate limiter, ban mirror, logout blocklist, the after-commit revocation
+      # write) for Lettuce's 60 s default before the caller's fallback runs. The command timeout also
+      # bounds the connection handshake.
+      timeout: 1s
+      connect-timeout: 1s
+      repositories:
+        enabled: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Explicit allowlist, NOT '*' (a heap dump would leak the JWT RSA private key).
+        include: health,info,prometheus,metrics
+  endpoint:
+    heapdump:
+      access: none
+    threaddump:
+      access: none
+
+logging:
+  level:
+    root: INFO
+    web: INFO
+  pattern:
+    # trace_id is put in the MDC by the OpenTelemetry Java agent; it links a log line to its trace in Jaeger.
+    correlation: "[%X{trace_id:-}] [%X{submissionId:-}] "
+
+oj:
+  security:
+    jwt:
+      # identity-service verifies the tokens it issues through its own JWKS, like every other service.
+      jwks-uri: ${OJ_JWKS_URI:http://localhost:${server.port}/.well-known/jwks.json}

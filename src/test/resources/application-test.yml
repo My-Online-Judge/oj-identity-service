@@ -1,0 +1,57 @@
+spring:
+  config:
+    activate:
+      on-profile: test
+  devtools:
+    add-properties: true
+  jpa:
+    database-platform: org.hibernate.dialect.H2Dialect
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+  flyway:
+    # Tests run on in-memory H2 with the schema built from entities (ddl-auto above).
+    # The Flyway migrations are Postgres-specific, so Flyway stays off for the test profile.
+    enabled: false
+  # Dummy OAuth/JWT config so the full application context loads under @SpringBootTest without
+  # real secrets or a live provider (no network calls happen at context-load time).
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: test-client-id
+            client-secret: test-client-secret
+            redirect-uri: http://localhost/login/oauth2/code/google
+        provider:
+          google:
+            authorization-uri: https://accounts.google.com/o/oauth2/auth
+            token-uri: https://oauth2.googleapis.com/token
+            user-info-uri: https://www.googleapis.com/oauth2/v3/userinfo
+
+application:
+  security:
+    jwt:
+      expiration: 86400000
+      refresh-token:
+        expiration: 259200000
+      # THROWAWAY TEST-ONLY RSA keypair (generated for the test profile, never used
+      # anywhere else). Real keys live only in the deployment .env.
+      rsa:
+        private-key: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JSUV2UUlCQURBTkJna3Foa2lHOXcwQkFRRUZBQVNDQktjd2dnU2pBZ0VBQW9JQkFRRExMSm0zbHlOQlJKL2EKSEVpc3c3OXU3bDl1ZktiNEltNXdvWXdLaUdhbUpDMFNCdnhKek45SE14UkgzdnVyR2dlZzFsREtoTmpvV1VjQgpSa3NxS2xKTjFaZDFnV3l0dlZiUFdFc3ZSTEdhUzgwdHRxOXRSODRDdThRdTkySW1TNzVQNTR6MXZ3dDhNQU5sCnpWYVo2UTdBYms0aE1ZVGt6S0lpWEgzNDRXc0NadCt6QWljQnJyY3FIY3hQTVE4ZTJVaTlxT28xWnVJTmJXSHQKeUM3MlVsVWRod0g1ZWxyOTlHOVh6RTAwQ3pHZ28zcHBFL25GUWJ2QXdoZkZURVJkSGxCR1dLZWRqcXRzTndmdApxSGxabStOczBLbSt6eUluNXg1VGdJODJrbjFSYVZhaFlsQWE4TnJxYlc0ZXU1dG12RzJyT1NITHpYVGREZm1VCjR4ZnBrNCtaQWdNQkFBRUNnZ0VBRFpvVlNteTBZQVM3bk9zQzFJb2dVVWxsR3l6K01xTi9lRXZnWjc0Yy9TZHoKMnY2YnVrY2NkWlJPV2Nkc1d0YVp4eU5COG1UMWJveTNpN2JNaG15aDZQTVJPajBwYlBJOWt4RUtxNFh5UysyaQpOVnJESU5KTFVQU0lIRXJVaDlMUFVXTWpsVG91aHloaHVkbUc0RFB4bUdGcUdwL0prVlcvendRWkxPWE9kN0VUCjRGM1hDUE4rZTNXOGxDMElGUjJzN0RXcENJVjJmbWRZUVdmUkh1dHQxdktROXVnY0JFVFlQQ1p1SnFBWVdWa2QKaEF4aFRPTFYxZEc5bjZQRFJsblFPQnNqRERJU0NYdlVsa1BmWm12RmtXa0tHQUdzSyt6RkpNcnRkNTg3aXU4VQpWTVByTUltWFJmM0VNN0FTMnZYc1BmQkMyc1BKcjBMcjcwYVllZFIxTndLQmdRRHJqUW45MThvNWlwcXJQUy95CmZFMGkzVTRjVmVJM0NhM0pTYnBZT3hXWDdxdEhrdmNCNFJveU9lZ2xVby9za1RudHNsbXpFUzJ6SVJxN1A0cjIKYlVDTXlPV1pXOGc1SXppdGNtVS9FdXlWQkJ0bHo5SklJY0hTbUllTUs5L1UwTnRtb0V3SVFUMzFXWUlXSkkvagpETGdrMVhJTXFDQ2xyRTIwejJQYnM2OHFYd0tCZ1FEYzBBTEJza2MvZE5qdFVqV2NEclYwcm5aeVg1N2RmanE2CnduTHNxQUpDZE1PaXZmakc3aERhRW5JS0hzcGNoTzBwR3R1d1luRXNOT2NGbnVqWEJKcUxDeUF4YzBhMXdzMUgKYk9sVlkvNlNkZm5TMHZjZmlob2x2ZytiUFJIQlVjQ252L1RoR2xUaGNxSjB6YmtZQXE3d2VjcmpJa3VwMzlFWApLVXg4djAzNUJ3S0JnRzZXeEJjaXBmWUlCZi9aZFZaaVY1REQyRFZqZVJhZis3Q2laZE9nd2MyWUoyQXVOcnZ5CkpHdHFWbnlYVzYwVXJkN1VPbHJnK05TOStSL3FnR0tiL285YWpybEdweVYwVE5yWjk0RDZjSXF4NSs4UCtFa1gKV0RsNGxVTVJJa0IzWWxxM2Jacitqb2xQWWN6bGs0eGszMXVqdnEwRWpuZGFBdzJkeE9OVVpDdi9Bb0dBQXRMTwpGamYzWFVKYk83MmZYZDE2U0lHcWxnL084am9ZK2laZVhkUlFJeFZuSXYrVzNNUlNodGRSaWZ1V3p0UU1URWhCCm91Ry9YTGRZZE9QeFNqNk8wMVJURnc3SVNxNncvVWJSUFB4SVZ3c1hKTEQ1NC9kYUdqMXg2YVJBUTk2TnZoZGcKUkRpWCtVSUQvY1picFlqelA3UHUralNJRHlZRGdHNVF3ZytZS2FVQ2dZRUEyS3pKV0tZSlNUZGJtREhiTVpBUApudkRhQXQ5R1hsZDZsZFlEUWhjOHJ1QWkxY1NWWjRBdG1qTEhxYmlhUjJDbjJTNzltR1NzY0ZXTnoyZTFwU2JSCmI5NkpEcG14WHMwZkxIVUltY3h6M2JXeEFWUjM2a1V4MWJ6bnRxcmpxajNzUEZxQnJneFF0VnJWVWNGVG9kZUgKMTdPRU9pamVFR2pEN0VzNGVxa2pQdDA9Ci0tLS0tRU5EIFBSSVZBVEUgS0VZLS0tLS0K
+        public-key: LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUF5eXladDVjalFVU2YyaHhJck1PLwpidTVmYm55bStDSnVjS0dNQ29obXBpUXRFZ2I4U2N6ZlJ6TVVSOTc3cXhvSG9OWlF5b1RZNkZsSEFVWkxLaXBTClRkV1hkWUZzcmIxV3oxaExMMFN4bWt2TkxiYXZiVWZPQXJ2RUx2ZGlKa3UrVCtlTTliOExmREFEWmMxV21la08Kd0c1T0lUR0U1TXlpSWx4OStPRnJBbWJmc3dJbkFhNjNLaDNNVHpFUEh0bEl2YWpxTldiaURXMWg3Y2d1OWxKVgpIWWNCK1hwYS9mUnZWOHhOTkFzeG9LTjZhUlA1eFVHN3dNSVh4VXhFWFI1UVJsaW5uWTZyYkRjSDdhaDVXWnZqCmJOQ3B2czhpSitjZVU0Q1BOcEo5VVdsV29XSlFHdkRhNm0xdUhydWJacnh0cXpraHk4MTAzUTM1bE9NWDZaT1AKbVFJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==
+
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+openapi:
+  service:
+    api-docs: identity-service
+    server: ${BACKEND_SERVICE:http://localhost:${server.port}}
+    title: Identity service
+    version: 1.0.0

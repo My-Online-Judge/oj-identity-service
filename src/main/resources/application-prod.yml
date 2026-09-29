@@ -1,0 +1,60 @@
+spring:
+  config:
+    activate:
+      on-profile: prod
+  datasource:
+    url: ${DATABASE_URL}
+    username: ${DATABASE_USERNAME}
+    password: ${DATABASE_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+    show-sql: false
+    hibernate:
+      ddl-auto: validate
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: ${GOOGLE_CLIENT_ID}
+            client-secret: ${GOOGLE_CLIENT_SECRET}
+            redirect-uri: ${GOOGLE_REDIRECT_URI}
+        provider:
+          google:
+            authorization-uri: ${GOOGLE_AUTH_URI}
+            token-uri: ${GOOGLE_TOKEN_URI}
+            user-info-uri: ${GOOGLE_USER_INFO_URI}
+
+server:
+  port: 8000
+
+management:
+  server:
+    # Actuator (health, prometheus) on its own port, like the gateway. Only the dev/prod profiles set
+    # it: under the test profile MockMvc must still reach /actuator on the main context.
+    port: 8081
+
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+logging:
+  level:
+    vn.thanhtuanle: INFO
+  file:
+    name: log/app.log
+
+application:
+  security:
+    jwt:
+      rsa:
+        private-key: ${JWT_RSA_PRIVATE_KEY}
+        public-key: ${JWT_RSA_PUBLIC_KEY}
+      expiration: ${JWT_ACCESS_TOKEN_EXPIRATION}
+      refresh-token:
+        expiration: ${JWT_REFRESH_TOKEN_EXPIRATION}

@@ -1,0 +1,74 @@
+spring:
+  config:
+    activate:
+      on-profile: dev
+  datasource:
+    url: ${DATABASE_URL}
+    username: ${DATABASE_USERNAME}
+    password: ${DATABASE_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+    show-sql: true
+    hibernate:
+      ddl-auto: validate
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: ${GOOGLE_CLIENT_ID}
+            client-secret: ${GOOGLE_CLIENT_SECRET}
+            redirect-uri: ${GOOGLE_REDIRECT_URI}
+        provider:
+          google:
+            authorization-uri: ${GOOGLE_AUTH_URI}
+            token-uri: ${GOOGLE_TOKEN_URI}
+            user-info-uri: ${GOOGLE_USER_INFO_URI}
+
+server:
+  port: 8000
+
+management:
+  server:
+    # Actuator (health, prometheus) on its own port, like the gateway. Only the dev/prod profiles set
+    # it: under the test profile MockMvc must still reach /actuator on the main context.
+    port: 8081
+
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+openapi:
+  service:
+    api-docs: identity-service
+    server: http://localhost:${server.port}
+    title: Identity service
+    version: 1.0.0
+
+logging:
+  level:
+    vn.thanhtuanle: DEBUG
+  file:
+    name: log/app.log
+
+application:
+  security:
+    jwt:
+      rsa:
+        private-key: ${JWT_RSA_PRIVATE_KEY}
+        public-key: ${JWT_RSA_PUBLIC_KEY}
+      expiration: ${JWT_ACCESS_TOKEN_EXPIRATION}
+      refresh-token:
+        expiration: ${JWT_REFRESH_TOKEN_EXPIRATION}
+
+app:
+  # Where the browser is sent back to after Google redirects to this API.
+  # Change this (not the Google Console) when the SPA moves port/host.
+  base-url: ${APP_BASE_URL:http://localhost:5173}
+  cookie:
+    # true behind HTTPS so the auth cookies carry Secure.
+    secure: ${COOKIE_SECURE:false}
