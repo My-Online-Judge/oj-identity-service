@@ -9,7 +9,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.client.RestTemplate;
 import vn.thanhtuanle.auth.dto.AuthResponse;
 import vn.thanhtuanle.common.enums.CommonStatus;
-import vn.thanhtuanle.common.exception.AppException;
+import vn.thanhtuanle.oj.common.web.error.AppException;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.common.util.JwtUtil;

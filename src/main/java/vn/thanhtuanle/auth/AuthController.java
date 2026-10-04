@@ -12,7 +12,7 @@ import vn.thanhtuanle.auth.dto.IntrospectRequest;
 import vn.thanhtuanle.auth.dto.IntrospectResponse;
 import vn.thanhtuanle.auth.dto.LoginRequest;
 import vn.thanhtuanle.common.constant.Routes;
-import vn.thanhtuanle.common.payload.ApiResponse;
+import vn.thanhtuanle.oj.common.web.payload.ApiResponse;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.user.dto.UserResponse;
 

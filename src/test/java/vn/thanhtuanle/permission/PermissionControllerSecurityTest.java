@@ -11,8 +11,8 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 
 import org.springframework.security.oauth2.jwt.JwtDecoder;
-import vn.thanhtuanle.config.CustomAccessDeniedHandler;
-import vn.thanhtuanle.config.CustomAuthenticationEntryPoint;
+import vn.thanhtuanle.oj.common.web.security.OjAccessDeniedHandler;
+import vn.thanhtuanle.oj.common.web.security.OjAuthenticationEntryPoint;
 import vn.thanhtuanle.oj.common.security.OjJwtAuthenticationFilter;
 import vn.thanhtuanle.config.SecurityConfig;
 
@@ -21,7 +21,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 @WebMvcTest(controllers = PermissionController.class)
 @Import({SecurityConfig.class, OjJwtAuthenticationFilter.class,
-        CustomAuthenticationEntryPoint.class, CustomAccessDeniedHandler.class})
+        OjAuthenticationEntryPoint.class, OjAccessDeniedHandler.class})
 @ActiveProfiles("test")
 class PermissionControllerSecurityTest {
 

@@ -15,7 +15,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import vn.thanhtuanle.common.constant.Routes;
-import vn.thanhtuanle.common.payload.ApiResponse;
+import vn.thanhtuanle.oj.common.web.payload.ApiResponse;
 import vn.thanhtuanle.user.dto.CreateUserRequest;
 import vn.thanhtuanle.user.dto.ResetPasswordRequest;
 import vn.thanhtuanle.user.dto.UpdateUserRequest;

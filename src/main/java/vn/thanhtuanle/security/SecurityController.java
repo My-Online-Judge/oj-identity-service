@@ -6,7 +6,7 @@ import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 import vn.thanhtuanle.common.constant.Routes;
-import vn.thanhtuanle.common.payload.ApiResponse;
+import vn.thanhtuanle.oj.common.web.payload.ApiResponse;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.security.dto.AttemptResponse;
 import vn.thanhtuanle.security.dto.BanResponse;

@@ -10,7 +10,8 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
-import vn.thanhtuanle.common.exception.AppException;
+import vn.thanhtuanle.oj.common.web.error.AppException;
+import vn.thanhtuanle.oj.common.web.error.RateLimitedException;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.common.util.ClientMeta;
 
@@ -52,10 +53,12 @@ class LoginRateLimiterTest {
     @Test
     void blocked_whenUsernameLocked() {
         when(redis.hasKey("oj:rl:lock:username:alice")).thenReturn(true);
+        // A RateLimitedException, so the shared handler answers 429 with Retry-After = the lock's length.
         assertThatThrownBy(() -> limiter.assertAllowed("alice", META))
-                .isInstanceOf(AppException.class)
-                .extracting(e -> ((AppException) e).getErrorCode())
-                .isEqualTo(ErrorCode.RATE_LIMITED);
+                .isInstanceOfSatisfying(RateLimitedException.class, e -> {
+                    assertThat(e.getErrorCode()).isEqualTo(ErrorCode.RATE_LIMITED);
+                    assertThat(e.getRetryAfterSeconds()).isEqualTo(LoginRateLimiter.LOCK_SECONDS);
+                });
     }
 
     @Test

@@ -5,7 +5,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import vn.thanhtuanle.common.exception.AppException;
+import vn.thanhtuanle.oj.common.web.error.AppException;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.entity.Role;
 import vn.thanhtuanle.permission.PermissionRepository;

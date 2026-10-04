@@ -9,7 +9,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import vn.thanhtuanle.auth.dto.AuthResponse;
 import vn.thanhtuanle.common.enums.CommonStatus;
 import vn.thanhtuanle.common.enums.TokenType;
-import vn.thanhtuanle.common.exception.AppException;
+import vn.thanhtuanle.oj.common.web.error.AppException;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.common.util.JwtUtil;

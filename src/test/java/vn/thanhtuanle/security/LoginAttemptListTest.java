@@ -10,7 +10,7 @@ import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.domain.Specification;
-import vn.thanhtuanle.common.payload.PageResponse;
+import vn.thanhtuanle.oj.common.web.payload.PageResponse;
 import vn.thanhtuanle.entity.LoginAttempt;
 import vn.thanhtuanle.security.dto.AttemptResponse;
 

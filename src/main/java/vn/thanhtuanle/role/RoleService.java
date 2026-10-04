@@ -5,7 +5,7 @@ import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import vn.thanhtuanle.auth.SessionRevoker;
-import vn.thanhtuanle.common.exception.AppException;
+import vn.thanhtuanle.oj.common.web.error.AppException;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.entity.Permission;
 import vn.thanhtuanle.entity.Role;

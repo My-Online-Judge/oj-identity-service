@@ -1,10 +1,11 @@
 package vn.thanhtuanle.common.exception;
 
 import lombok.Getter;
+import vn.thanhtuanle.oj.common.web.error.ErrorCodeSpec;
 import org.springframework.http.HttpStatus;
 
 @Getter
-public enum ErrorCode {
+public enum ErrorCode implements ErrorCodeSpec {
     USER_NOT_EXISTED("Invalid credentials", HttpStatus.UNAUTHORIZED),
     USER_EXISTED("User existed", HttpStatus.BAD_REQUEST),
     ACCESS_DENIED("Access denied", HttpStatus.FORBIDDEN),

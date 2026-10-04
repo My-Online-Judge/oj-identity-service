@@ -7,7 +7,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import vn.thanhtuanle.common.constant.Routes;
-import vn.thanhtuanle.common.payload.ApiResponse;
+import vn.thanhtuanle.oj.common.web.payload.ApiResponse;
 import vn.thanhtuanle.permission.dto.PermissionResponse;
 
 import java.util.List;

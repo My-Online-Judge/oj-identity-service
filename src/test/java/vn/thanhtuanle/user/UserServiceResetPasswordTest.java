@@ -6,7 +6,7 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.crypto.password.PasswordEncoder;
-import vn.thanhtuanle.common.exception.AppException;
+import vn.thanhtuanle.oj.common.web.error.AppException;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.entity.Role;
 import vn.thanhtuanle.entity.User;

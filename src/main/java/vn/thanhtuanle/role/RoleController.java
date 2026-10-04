@@ -13,7 +13,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
 import vn.thanhtuanle.common.constant.Routes;
-import vn.thanhtuanle.common.payload.ApiResponse;
+import vn.thanhtuanle.oj.common.web.payload.ApiResponse;
 import vn.thanhtuanle.role.dto.CreateRoleRequest;
 import vn.thanhtuanle.role.dto.RoleResponse;
 import vn.thanhtuanle.role.dto.UpdateRolePermissionsRequest;

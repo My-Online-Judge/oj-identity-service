@@ -18,6 +18,8 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import vn.thanhtuanle.auth.JwksController;
 import vn.thanhtuanle.oj.common.security.OjJwtAuthenticationFilter;
+import vn.thanhtuanle.oj.common.web.security.OjAuthenticationEntryPoint;
+import vn.thanhtuanle.oj.common.web.security.OjAccessDeniedHandler;
 
 @Configuration
 @EnableMethodSecurity
@@ -26,8 +28,8 @@ public class SecurityConfig {
 
     private final OjJwtAuthenticationFilter jwtAuthFilter;
     private final UserDetailsService userDetailsService;
-    private final CustomAuthenticationEntryPoint customAuthenticationEntryPoint;
-    private final CustomAccessDeniedHandler customAccessDeniedHandler;
+    private final OjAuthenticationEntryPoint authenticationEntryPoint;
+    private final OjAccessDeniedHandler accessDeniedHandler;
     private static final String[] WHITE_LIST = {
             "/api/v1/auth/**",
             "/h2-console/**",
@@ -58,8 +60,8 @@ public class SecurityConfig {
                         .requestMatchers(WHITE_LIST).permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(exception -> exception
-                        .authenticationEntryPoint(customAuthenticationEntryPoint)
-                        .accessDeniedHandler(customAccessDeniedHandler))
+                        .authenticationEntryPoint(authenticationEntryPoint)
+                        .accessDeniedHandler(accessDeniedHandler))
                 .authenticationProvider(authenticationProvider())
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
 

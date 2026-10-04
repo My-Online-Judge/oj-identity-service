@@ -9,7 +9,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import vn.thanhtuanle.common.payload.PageResponse;
+import vn.thanhtuanle.oj.common.web.payload.PageResponse;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.entity.LoginAttempt;
 import vn.thanhtuanle.security.dto.AttemptResponse;

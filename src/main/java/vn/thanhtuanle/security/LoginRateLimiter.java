@@ -5,7 +5,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
-import vn.thanhtuanle.common.exception.AppException;
+import vn.thanhtuanle.oj.common.web.error.RateLimitedException;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.common.util.ClientMeta;
 
@@ -46,7 +46,7 @@ public class LoginRateLimiter {
                 .register(registry);
     }
 
-    /** Throws 429 RATE_LIMITED when any dimension of this attempt is locked. */
+    /** Throws 429 RATE_LIMITED, with Retry-After = the lock's length, when any dimension of this attempt is locked. */
     public void assertAllowed(String username, ClientMeta meta) {
         boolean locked;
         try {
@@ -57,7 +57,7 @@ public class LoginRateLimiter {
         }
         if (locked) {
             throttled.increment();
-            throw new AppException(ErrorCode.RATE_LIMITED);
+            throw new RateLimitedException(ErrorCode.RATE_LIMITED, LOCK_SECONDS);
         }
     }
 

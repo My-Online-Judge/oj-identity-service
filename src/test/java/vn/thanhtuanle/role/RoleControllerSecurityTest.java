@@ -11,8 +11,8 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 
 import org.springframework.security.oauth2.jwt.JwtDecoder;
-import vn.thanhtuanle.config.CustomAccessDeniedHandler;
-import vn.thanhtuanle.config.CustomAuthenticationEntryPoint;
+import vn.thanhtuanle.oj.common.web.security.OjAccessDeniedHandler;
+import vn.thanhtuanle.oj.common.web.security.OjAuthenticationEntryPoint;
 import vn.thanhtuanle.oj.common.security.OjJwtAuthenticationFilter;
 import vn.thanhtuanle.config.SecurityConfig;
 
@@ -21,7 +21,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 @WebMvcTest(controllers = RoleController.class)
 @Import({SecurityConfig.class, OjJwtAuthenticationFilter.class,
-        CustomAuthenticationEntryPoint.class, CustomAccessDeniedHandler.class})
+        OjAuthenticationEntryPoint.class, OjAccessDeniedHandler.class})
 @ActiveProfiles("test")
 class RoleControllerSecurityTest {
 
@@ -56,7 +56,7 @@ class RoleControllerSecurityTest {
     @Test
     void unauthorized_withNoToken() throws Exception {
         // No @WithMockUser: this exercises the real filter chain (OjJwtAuthenticationFilter +
-        // CustomAuthenticationEntryPoint) end to end, not just the entry point bean in
+        // OjAuthenticationEntryPoint) end to end, not just the entry point bean in
         // isolation. 401 = "not authenticated, go refresh" -- distinct from the 403 RBAC
         // denials above, which must stay 403.
         mockMvc.perform(get("/api/v1/roles")).andExpect(status().isUnauthorized());

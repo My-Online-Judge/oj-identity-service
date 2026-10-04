@@ -5,7 +5,7 @@ import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.NoArgsConstructor;
 import lombok.experimental.SuperBuilder;
-import vn.thanhtuanle.common.payload.BaseResponse;
+import vn.thanhtuanle.oj.common.web.payload.BaseResponse;
 import vn.thanhtuanle.entity.Role;
 
 import java.time.LocalDateTime;
