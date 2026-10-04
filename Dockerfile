@@ -1,5 +1,5 @@
-# Build stage
-FROM maven:3.9-eclipse-temurin-17-alpine AS builder
+# Build stage. Debian-based, not Alpine: oj-common generates its gRPC stubs with protoc, a glibc binary.
+FROM maven:3.9-eclipse-temurin-17 AS builder
 # oj-common is a sibling repo that is not published yet: compile it into this build's local Maven
 # repository first. Compose passes it as the named build context "oj-common" (additional_contexts).
 COPY --from=oj-common . /oj-common
