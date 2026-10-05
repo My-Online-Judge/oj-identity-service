@@ -65,7 +65,7 @@ public class JwtUtil {
             byte[] fingerprint = MessageDigest.getInstance("SHA-256").digest(rsaPublicKey.getEncoded());
             keyId = HexFormat.of().formatHex(fingerprint).substring(0, 16);
         } catch (Exception e) {
-            // Fail fast: a judge-api that cannot sign or verify tokens must not boot.
+            // Fail fast: an identity-service that cannot sign or verify tokens must not boot.
             throw new IllegalStateException(
                     "Invalid or missing RSA JWT keys (JWT_RSA_PRIVATE_KEY / JWT_RSA_PUBLIC_KEY)", e);
         }

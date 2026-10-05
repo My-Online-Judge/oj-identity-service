@@ -132,7 +132,7 @@
 			<scope>runtime</scope>
 		</dependency>
 
-		<!-- Redis (SSE verdict fan-out across judge-api instances) -->
+		<!-- Redis (token blocklist, sessions, login rate limits, the ban mirror) -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-data-redis</artifactId>

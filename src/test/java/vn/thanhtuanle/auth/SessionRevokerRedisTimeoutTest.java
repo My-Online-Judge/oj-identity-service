@@ -22,7 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * With Redis down, the after-commit revocation write must give up in about a second, not hold the
- * admin's request (and its JDBC connection) for Lettuce's 60 s default. Uses judge-api's own
+ * admin's request (and its JDBC connection) for Lettuce's 60 s default. Uses this service's own
  * application.yml Redis settings against a stand-in that accepts connections and never replies.
  */
 class SessionRevokerRedisTimeoutTest {

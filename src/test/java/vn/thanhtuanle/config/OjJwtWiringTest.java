@@ -36,9 +36,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * The whole request path with real tokens: judge-api's JwtUtil mints them, oj-common's lenient
+ * The whole request path with real tokens: identity-service's JwtUtil mints them, oj-common's lenient
  * filter and validation rules verify them inside the real SecurityConfig chain. Only the key
- * lookup differs — the decoder is keyed with judge-api's public key directly, because MockMvc has
+ * lookup differs — the decoder is keyed with this service's public key directly, because MockMvc has
  * no running server for the JWKS URL to reach (JWKS itself is covered by JwksControllerTest and
  * the E2E run).
  */
@@ -75,7 +75,7 @@ class OjJwtWiringTest {
         return jwtUtil.generateToken(user);
     }
 
-    /** Signed by judge-api's real key but shaped like a pre-1a token (roles claim, no uid). */
+    /** Signed by this service's real key but shaped like a pre-1a token (roles claim, no uid). */
     private String oldFormatToken(Date expiresAt) throws Exception {
         String pem = new String(Base64.getMimeDecoder().decode(privateKeyPem), StandardCharsets.UTF_8)
                 .replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "")

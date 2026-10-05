@@ -12,9 +12,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 
 /**
- * CORS is answered by the api-gateway (oj-api-gateway). If judge-api also emitted
+ * CORS is answered by the api-gateway (oj-api-gateway). If this service also emitted
  * Access-Control-* headers, a browser would see Access-Control-Allow-Origin twice and reject the
- * response, so judge-api must emit none — for simple requests and preflights alike.
+ * response, so this service must emit none — for simple requests and preflights alike.
  *
  * <p>The origin is the Vite dev server, {@code http://localhost:5173}: MockMvc requests target
  * {@code http://localhost:80}, so {@code Origin: http://localhost} would be SAME-origin and Spring
