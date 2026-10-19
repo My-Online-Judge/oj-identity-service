@@ -1,5 +1,7 @@
 # Internal TLS (sub-project 10). Switched on with SPRING_PROFILES_INCLUDE=tls; the certificates are mounted at
 # ${OJ_TLS_DIR} (docker-compose.yml: the tls volume, subpath = this service's name). Missing files fail the startup.
+# Spring Boot orders spring.profiles.include profiles before the active ones, so an active profile's file
+# (application-prod.yml, application-dev.yml) wins over this one: never set a TLS key there too.
 spring:
   ssl:
     bundle:
@@ -44,5 +46,5 @@ oj:
     allowed-clients: api-gateway,problem-service,submission-service,identity-service
   security:
     jwt:
-      jwks-uri: https://localhost:8000/.well-known/jwks.json
+      jwks-uri: https://localhost:${server.port}/.well-known/jwks.json
       jwks-ssl-bundle: oj
