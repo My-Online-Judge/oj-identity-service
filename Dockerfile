@@ -12,6 +12,9 @@ RUN mvn clean package -DskipTests
 # Run stage
 FROM eclipse-temurin:17-jre-alpine
 WORKDIR /app
+# curl: the compose healthcheck calls the actuator over mutual TLS, presenting this service's certificate
+# (busybox wget cannot send a client certificate).
+RUN apk add --no-cache curl
 # OpenTelemetry Java agent, pinned and checksum-verified. The deployment ENABLES it with
 # JAVA_TOOL_OPTIONS=-javaagent:/otel/opentelemetry-javaagent.jar; without that the image runs untraced.
 ARG OTEL_AGENT_VERSION=2.31.1

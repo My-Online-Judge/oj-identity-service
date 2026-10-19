@@ -21,3 +21,28 @@ spring:
     redis:
       ssl:
         bundle: oj
+# The API (server.port) and actuator (management.server.port) ports serve TLS and require a CA-signed client
+# certificate. On the API port only the CNs below get past oj-common's PeerCertificateFilter (403 otherwise); the
+# actuator port has no CN allowlist (Prometheus and the healthcheck present their own certificates). Management SSL
+# needs a separate management.server.port (dev and prod set 8081): on the main port, Spring Boot refuses to start.
+server:
+  ssl:
+    bundle: oj
+    client-auth: need
+management:
+  server:
+    ssl:
+      enabled: true
+      bundle: oj
+      client-auth: need
+  health:
+    ssl:
+      certificate-validity-warning-threshold: 30d
+oj:
+  tls:
+    # identity-service verifies its own tokens through its own JWKS, so it calls itself.
+    allowed-clients: api-gateway,problem-service,submission-service,identity-service
+  security:
+    jwt:
+      jwks-uri: https://localhost:8000/.well-known/jwks.json
+      jwks-ssl-bundle: oj
