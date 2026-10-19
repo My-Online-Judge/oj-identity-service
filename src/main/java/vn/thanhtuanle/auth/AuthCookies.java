@@ -5,7 +5,11 @@ import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-/** Auth-cookie writing shared by the auth and user controllers. */
+/**
+ * Auth-cookie writing shared by the auth and user controllers: every cookie the service sets goes through
+ * {@link #write}. SameSite=Lax: the portal and the API share one origin behind the edge, so a cross-site page cannot
+ * make the browser send the session on a POST.
+ */
 @Component
 public class AuthCookies {
 
@@ -22,6 +26,7 @@ public class AuthCookies {
         cookie.setSecure(secure);
         cookie.setPath("/");
         cookie.setMaxAge(maxAge);
+        cookie.setAttribute("SameSite", "Lax");
         response.addCookie(cookie);
     }
 
