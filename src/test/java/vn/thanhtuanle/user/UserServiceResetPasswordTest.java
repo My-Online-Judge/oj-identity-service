@@ -31,6 +31,9 @@ class UserServiceResetPasswordTest {
     @Mock RoleRepository roleRepository;
     @Mock UserMapper userMapper;
     @Mock PasswordEncoder passwordEncoder;
+    @Mock vn.thanhtuanle.auth.SessionRevoker sessionRevoker;
+    @Mock vn.thanhtuanle.repository.TokenRepository tokenRepository;
+    @Mock DefaultAdminPasswordGauge gauge;
 
     @InjectMocks UserService userService;
 

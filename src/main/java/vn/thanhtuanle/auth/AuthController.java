@@ -16,7 +16,6 @@ import vn.thanhtuanle.oj.common.web.payload.ApiResponse;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.user.dto.UserResponse;
 
-import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
@@ -31,8 +30,8 @@ import java.util.Map;
 @Slf4j
 public class AuthController {
 
-    private static final String ACCESS_TOKEN_COOKIE = "accessToken";
-    private static final String REFRESH_TOKEN_COOKIE = "refreshToken";
+    private static final String ACCESS_TOKEN_COOKIE = AuthCookies.ACCESS_TOKEN_COOKIE;
+    private static final String REFRESH_TOKEN_COOKIE = AuthCookies.REFRESH_TOKEN_COOKIE;
     private static final String OAUTH_STATE_COOKIE = "oauthState";
     private static final int ACCESS_TOKEN_MAX_AGE = 24 * 60 * 60; // 1 day
     private static final int REFRESH_TOKEN_MAX_AGE = 7 * 24 * 60 * 60; // 7 days
@@ -150,11 +149,6 @@ public class AuthController {
     }
 
     private void addCookie(HttpServletResponse response, String name, String value, int maxAge) {
-        Cookie cookie = new Cookie(name, value);
-        cookie.setHttpOnly(true);
-        cookie.setSecure(cookieSecure);
-        cookie.setPath("/");
-        cookie.setMaxAge(maxAge);
-        response.addCookie(cookie);
+        AuthCookies.write(response, name, value, maxAge, cookieSecure);
     }
 }

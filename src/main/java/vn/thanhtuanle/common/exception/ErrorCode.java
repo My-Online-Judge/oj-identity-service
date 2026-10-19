@@ -26,6 +26,7 @@ public enum ErrorCode implements ErrorCodeSpec {
     USER_SELF_MODIFY("You cannot change your own roles, status, or delete your own account", HttpStatus.CONFLICT),
     USERNAME_INVALID("Username must be 3-32 characters: letters, digits, or underscore", HttpStatus.BAD_REQUEST),
     PASSWORD_INVALID("Password must be at least 8 characters and include letters and digits", HttpStatus.BAD_REQUEST),
+    PASSWORD_UNCHANGED("New password must differ from the current one", HttpStatus.BAD_REQUEST),
     EMAIL_INVALID("Email is not valid", HttpStatus.BAD_REQUEST),
     USER_STATUS_INVALID("Status must be ACTIVE or DISABLED", HttpStatus.BAD_REQUEST),
     RATE_LIMITED("Too many failed login attempts. Try again later", HttpStatus.TOO_MANY_REQUESTS),

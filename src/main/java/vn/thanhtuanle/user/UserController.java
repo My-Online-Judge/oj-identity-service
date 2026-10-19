@@ -14,8 +14,12 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import jakarta.servlet.http.HttpServletResponse;
+import jakarta.validation.Valid;
+import vn.thanhtuanle.auth.AuthCookies;
 import vn.thanhtuanle.common.constant.Routes;
 import vn.thanhtuanle.oj.common.web.payload.ApiResponse;
+import vn.thanhtuanle.user.dto.ChangePasswordRequest;
 import vn.thanhtuanle.user.dto.CreateUserRequest;
 import vn.thanhtuanle.user.dto.ResetPasswordRequest;
 import vn.thanhtuanle.user.dto.UpdateUserRequest;
@@ -32,6 +36,17 @@ import java.util.UUID;
 public class UserController {
 
     private final UserService userService;
+    private final AuthCookies authCookies;
+
+    @Operation(summary = "Change my own password; ends every session, so sign in again")
+    @PutMapping(Routes.USERS + "/me/password")
+    @PreAuthorize("isAuthenticated()")
+    public ApiResponse<Void> changeOwnPassword(@Valid @RequestBody ChangePasswordRequest request,
+            HttpServletResponse response) {
+        userService.changeOwnPassword(request.getCurrentPassword(), request.getNewPassword());
+        authCookies.clearSession(response);
+        return ApiResponse.success();
+    }
 
     @Operation(summary = "List users with filters (admin)")
     @GetMapping(Routes.USERS)

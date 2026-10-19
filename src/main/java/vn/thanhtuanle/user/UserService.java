@@ -17,6 +17,7 @@ import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.oj.common.web.payload.PageResponse;
 import vn.thanhtuanle.entity.Role;
 import vn.thanhtuanle.entity.User;
+import vn.thanhtuanle.repository.TokenRepository;
 import vn.thanhtuanle.user.dto.CreateUserRequest;
 import vn.thanhtuanle.user.dto.UpdateUserRequest;
 import vn.thanhtuanle.user.dto.UserResponse;
@@ -43,6 +44,8 @@ public class UserService {
     private final UserMapper userMapper;
     private final PasswordEncoder passwordEncoder;
     private final SessionRevoker sessionRevoker;
+    private final TokenRepository tokenRepository;
+    private final DefaultAdminPasswordGauge defaultAdminPasswordGauge;
 
     /** A lazy reference by id — no query — for linking an entity to the user behind the request. */
     public User getReference(UUID id) {
@@ -169,7 +172,32 @@ public class UserService {
         validatePassword(newPassword);
         user.setPassword(passwordEncoder.encode(newPassword));
         userRepository.save(user);
+        endSessions(user.getId());
         log.info("Reset password for user {}", user.getUsername());
+    }
+
+    /** Change the signed-in user's own password (SYS_ROOT included); every session of theirs ends. */
+    @Transactional
+    public void changeOwnPassword(String current, String next) {
+        User user = getCurrentUser();
+        if (!passwordEncoder.matches(current, user.getPassword())) {
+            throw new AppException(ErrorCode.INVALID_CREDENTIALS);
+        }
+        if (next != null && next.equals(current)) {
+            throw new AppException(ErrorCode.PASSWORD_UNCHANGED);
+        }
+        validatePassword(next);
+        user.setPassword(passwordEncoder.encode(next));
+        userRepository.save(user);
+        endSessions(user.getId());
+        log.info("User {} changed their password", user.getUsername());
+    }
+
+    /** A new credential invalidates refresh tokens now and live access tokens once the transaction commits. */
+    private void endSessions(UUID userId) {
+        tokenRepository.deleteAllByUserId(userId);
+        sessionRevoker.revokeAccessTokensAfterCommit(List.of(userId));
+        defaultAdminPasswordGauge.refresh();
     }
 
     @Transactional
