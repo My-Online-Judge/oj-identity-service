@@ -31,6 +31,8 @@ class PostgresClientCertTest {
 
     private static final List<String> FIXTURES = List.of(
             "ca.crt", "server.crt", "server.key", "api-gateway.crt", "api-gateway.key", "pg_hba.conf");
+    private static final List<String> CLIENT_FILES = List.of(
+            "ca.crt", "api-gateway.crt", "api-gateway.key", "rogue-client.crt", "rogue-client.key");
 
     static GenericContainer<?> postgres;
     static Path clientDir;
@@ -39,9 +41,13 @@ class PostgresClientCertTest {
     static void startPostgres() throws Exception {
         // pgjdbc refuses a client key that is readable by others, and git does not keep file modes.
         clientDir = Files.createTempDirectory("pg-client");
-        for (String f : List.of("ca.crt", "api-gateway.crt", "api-gateway.key")) {
+        for (String f : CLIENT_FILES) {
             Path target = clientDir.resolve(f);
             try (var in = PostgresClientCertTest.class.getResourceAsStream("/tls/" + f)) {
+                if (in == null) {
+                    throw new IllegalStateException("test fixture missing from the classpath: /tls/" + f
+                            + " (regenerate with judge-deployment/pki/pki.sh fixtures)");
+                }
                 Files.copy(in, target);
             }
             Files.setPosixFilePermissions(target, PosixFilePermissions.fromString(f.endsWith(".key") ? "rw-------" : "rw-r--r--"));
@@ -73,6 +79,13 @@ class PostgresClientCertTest {
         if (postgres != null) {
             postgres.stop();
         }
+        if (clientDir != null) {
+            try (var files = Files.walk(clientDir)) {
+                files.sorted(java.util.Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
+            } catch (java.io.IOException ignored) {
+                // a leftover temp directory is harmless
+            }
+        }
     }
 
     private static String url(String params) {
@@ -99,6 +112,16 @@ class PostgresClientCertTest {
     @Test
     void refusedWithoutClientCert() {
         assertThatThrownBy(() -> DriverManager.getConnection(url("sslmode=verify-full&" + ca()), "postgres", "secret").close())
+                .isInstanceOf(SQLException.class)
+                .hasMessageContaining("certificate");
+    }
+
+    @Test
+    void refusedWithClientCertFromAnotherCa() {
+        String params = "sslmode=verify-full&" + ca()
+                + "&sslcert=" + clientDir.resolve("rogue-client.crt")
+                + "&sslkey=" + clientDir.resolve("rogue-client.key");
+        assertThatThrownBy(() -> DriverManager.getConnection(url(params), "postgres", "secret").close())
                 .isInstanceOf(SQLException.class)
                 .hasMessageContaining("certificate");
     }
