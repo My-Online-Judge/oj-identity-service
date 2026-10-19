@@ -52,10 +52,10 @@ class IdentitySchemaTest {
     @Test
     @Transactional
     void aFreshIdentityDbMatchesTheEntitiesAndIsUsable() {
-        assertThat(permissions.count()).isEqualTo(17);
+        assertThat(permissions.count()).isEqualTo(18);
         assertThat(roles.findAll()).extracting(Role::getName)
                 .containsExactlyInAnyOrder("USER", "ADMIN", "SYS_ROOT");
-        assertThat(roles.findByName("SYS_ROOT").orElseThrow().getPermissions()).hasSize(17);
+        assertThat(roles.findByName("SYS_ROOT").orElseThrow().getPermissions()).hasSize(18);
 
         User admin = users.findByUsername("admin").orElseThrow();
         assertThat(admin.getStatus()).isEqualTo(1);
