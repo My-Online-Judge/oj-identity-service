@@ -1,0 +1,19 @@
+# Internal TLS (sub-project 10). Switched on with SPRING_PROFILES_INCLUDE=tls; the certificates are mounted at
+# ${OJ_TLS_DIR} (docker-compose.yml: the tls volume, subpath = this service's name). Missing files fail the startup.
+spring:
+  ssl:
+    bundle:
+      pem:
+        oj:
+          keystore:
+            certificate: ${OJ_TLS_DIR:/etc/oj/tls}/tls.crt
+            private-key: ${OJ_TLS_DIR:/etc/oj/tls}/tls.key
+          truststore:
+            certificate: ${OJ_TLS_DIR:/etc/oj/tls}/ca.crt
+  datasource:
+    hikari:
+      data-source-properties:
+        sslmode: verify-full
+        sslrootcert: ${OJ_TLS_DIR:/etc/oj/tls}/ca.crt
+        sslcert: ${OJ_TLS_DIR:/etc/oj/tls}/tls.crt
+        sslkey: ${OJ_TLS_DIR:/etc/oj/tls}/tls.key
