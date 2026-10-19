@@ -181,7 +181,7 @@ public class UserService {
     public void changeOwnPassword(String current, String next) {
         User user = getCurrentUser();
         if (!passwordEncoder.matches(current, user.getPassword())) {
-            throw new AppException(ErrorCode.INVALID_CREDENTIALS);
+            throw new AppException(ErrorCode.CURRENT_PASSWORD_INCORRECT);
         }
         if (next != null && next.equals(current)) {
             throw new AppException(ErrorCode.PASSWORD_UNCHANGED);

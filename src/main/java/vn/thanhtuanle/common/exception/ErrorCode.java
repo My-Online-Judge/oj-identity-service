@@ -11,6 +11,7 @@ public enum ErrorCode implements ErrorCodeSpec {
     ACCESS_DENIED("Access denied", HttpStatus.FORBIDDEN),
     USER_BLOCKED("User is blocked", HttpStatus.FORBIDDEN),
     INVALID_CREDENTIALS("Invalid credentials", HttpStatus.UNAUTHORIZED),
+    CURRENT_PASSWORD_INCORRECT("Current password is incorrect", HttpStatus.BAD_REQUEST),
     ROLE_NOT_EXISTED("Role not found", HttpStatus.NOT_FOUND),
     PERMISSION_NOT_EXISTED("One or more permissions do not exist", HttpStatus.BAD_REQUEST),
     ROLE_IMMUTABLE("This role's permissions cannot be modified", HttpStatus.CONFLICT),

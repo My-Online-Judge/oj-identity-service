@@ -98,11 +98,11 @@ class UserServiceChangePasswordTest {
     }
 
     @Test
-    void wrongCurrentPassword401() {
+    void wrongCurrentPassword400() {
         signedIn("USER");
         when(passwordEncoder.matches("Nope1234", "HASH")).thenReturn(false);
 
-        assertCode(() -> userService.changeOwnPassword("Nope1234", "NewPass12"), ErrorCode.INVALID_CREDENTIALS);
+        assertCode(() -> userService.changeOwnPassword("Nope1234", "NewPass12"), ErrorCode.CURRENT_PASSWORD_INCORRECT);
         verify(userRepository, never()).save(any());
         verify(tokenRepository, never()).deleteAllByUserId(any());
     }
