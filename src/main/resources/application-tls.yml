@@ -17,3 +17,7 @@ spring:
         sslrootcert: ${OJ_TLS_DIR:/etc/oj/tls}/ca.crt
         sslcert: ${OJ_TLS_DIR:/etc/oj/tls}/tls.crt
         sslkey: ${OJ_TLS_DIR:/etc/oj/tls}/tls.key
+  data:
+    redis:
+      ssl:
+        bundle: oj
