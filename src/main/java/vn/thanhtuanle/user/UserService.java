@@ -6,12 +6,12 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import vn.thanhtuanle.auth.Caller;
 import vn.thanhtuanle.auth.SessionRevoker;
 import vn.thanhtuanle.common.enums.UserStatus;
 import vn.thanhtuanle.oj.common.web.error.AppException;
@@ -57,11 +57,9 @@ public class UserService {
         return userRepository.getReferenceById(id);
     }
 
+    /** The signed-in user: the live account the access token names by id ({@link Caller}), never by username. */
     public User getCurrentUser() {
-        var authentication = SecurityContextHolder.getContext().getAuthentication();
-        String username = authentication.getName();
-
-        return userRepository.findByUsername(username)
+        return Caller.id().flatMap(userRepository::findLiveById)
                 .orElseThrow(() -> new AppException(ErrorCode.USER_NOT_EXISTED));
     }
 

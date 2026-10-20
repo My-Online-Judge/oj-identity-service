@@ -622,25 +622,23 @@ public class AuthService {
                 .build();
     }
 
+    /** The caller's profile: the live account its access token names by id ({@link Caller}), never by username. */
     public UserResponse me() {
         log.info("Fetching current user information");
-        var authentication = SecurityContextHolder.getContext().getAuthentication();
-        String username = authentication.getName();
-
-        User user = userRepository.findByUsername(username)
+        User user = Caller.id().flatMap(userRepository::findLiveById)
                 .orElseThrow(() -> {
-                    log.warn("User not found with username: {}", username);
+                    log.warn("No live user for the access token's uid");
                     return new AppException(ErrorCode.USER_NOT_EXISTED);
                 });
 
-        log.info("User information retrieved for username: {}", username);
+        log.info("User information retrieved for username: {}", user.getUsername());
         return userMapper.toResponse(user);
     }
 
     /**
-     * Ends every session of the caller. The caller is found from a verified access token or, when that has expired
-     * (the common case with 15-minute tokens: the request is then anonymous), from the refresh cookie. With neither
-     * there is nothing to end, and the caller still clears the cookies.
+     * Ends every session of the caller. The caller is found from a verified access token (by its {@code uid}, see
+     * {@link Caller}) or, when that has expired (the common case with 15-minute tokens: the request is then anonymous),
+     * from the refresh cookie. With neither there is nothing to end, and the caller still clears the cookies.
      */
     @Transactional
     public void logout(String refreshToken) {
@@ -653,7 +651,7 @@ public class AuthService {
             // only invalidates refresh tokens — access tokens are verified without the DB).
             String accessToken = jwtAuthentication.getToken().getTokenValue();
             tokenBlocklist.block(jwtUtil.extractJti(accessToken), jwtUtil.getRemainingTtlMillis(accessToken));
-            userId = userRepository.findByUsername(jwtAuthentication.getName()).map(User::getId);
+            userId = Caller.id().flatMap(userRepository::findLiveById).map(User::getId);
         }
         if (userId.isEmpty() && refreshToken != null && !refreshToken.isBlank()) {
             userId = tokenRepository.findByToken(TokenHasher.sha256Hex(refreshToken)).map(row -> row.getUser().getId());

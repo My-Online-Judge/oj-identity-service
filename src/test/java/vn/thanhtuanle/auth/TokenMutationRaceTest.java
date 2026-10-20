@@ -31,8 +31,9 @@ import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.oj.common.web.error.AppException;
 import vn.thanhtuanle.user.UserRepository;
 import vn.thanhtuanle.user.UserService;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -167,8 +168,11 @@ class TokenMutationRaceTest {
         Future<AuthResponse> login = loginPausedAfterThePasswordCheck(user, checked, release);
 
         second.submit(() -> {
+            // Signed in: the caller is its access token's uid.
+            Jwt jwt = Jwt.withTokenValue("access.token").header("alg", "RS256").subject(user.getUsername())
+                    .claim("uid", user.getId().toString()).build();
             SecurityContextHolder.getContext().setAuthentication(
-                    new UsernamePasswordAuthenticationToken(user.getUsername(), null, List.of()));
+                    new JwtAuthenticationToken(jwt, List.of(), user.getUsername()));
             try {
                 userService.changeOwnPassword(PASSWORD, "Changed123");
             } finally {

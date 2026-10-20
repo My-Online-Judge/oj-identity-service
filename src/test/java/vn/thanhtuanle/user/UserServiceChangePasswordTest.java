@@ -7,8 +7,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -61,9 +62,11 @@ class UserServiceChangePasswordTest {
             roles.add(Role.builder().name(n).build());
         }
         u.setRoles(roles);
-        SecurityContextHolder.getContext()
-                .setAuthentication(new UsernamePasswordAuthenticationToken("me", null, List.of()));
-        when(userRepository.findByUsername("me")).thenReturn(Optional.of(u));
+        // What OjJwtAuthenticationFilter puts in the context for the user's access token: the caller is its uid.
+        Jwt jwt = Jwt.withTokenValue("access.token").header("alg", "RS256").subject("me")
+                .claim("uid", id.toString()).build();
+        SecurityContextHolder.getContext().setAuthentication(new JwtAuthenticationToken(jwt, List.of(), "me"));
+        when(userRepository.findLiveById(id)).thenReturn(Optional.of(u));
         return u;
     }
 

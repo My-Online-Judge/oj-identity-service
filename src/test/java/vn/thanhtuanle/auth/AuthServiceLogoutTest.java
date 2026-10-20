@@ -58,20 +58,22 @@ class AuthServiceLogoutTest {
         SecurityContextHolder.clearContext();
     }
 
-    private void authenticateAs(String username, String token) {
-        // What OjJwtAuthenticationFilter puts in the context for a verified access token.
-        Jwt jwt = Jwt.withTokenValue(token).header("alg", "RS256").subject(username).build();
+    /** alice, signed in with this access token: what OjJwtAuthenticationFilter puts in the context for it. */
+    private User signedIn(String token) {
+        User user = User.builder().username("alice@example.com").build();
+        user.setId(UUID.randomUUID());
+        Jwt jwt = Jwt.withTokenValue(token).header("alg", "RS256").subject(user.getUsername())
+                .claim("uid", user.getId().toString()).build();
         SecurityContextHolder.getContext().setAuthentication(
-                new JwtAuthenticationToken(jwt, Collections.emptyList(), username));
+                new JwtAuthenticationToken(jwt, Collections.emptyList(), user.getUsername()));
+        when(userRepository.findLiveById(user.getId())).thenReturn(Optional.of(user));
+        return user;
     }
 
     @Test
     void logout_blocklistsTheCurrentTokensJti_forItsRemainingLifetime() {
         String token = "current.access.token";
-        authenticateAs("alice@example.com", token);
-        User user = User.builder().username("alice@example.com").build();
-        user.setId(UUID.randomUUID());
-        when(userRepository.findByUsername("alice@example.com")).thenReturn(Optional.of(user));
+        signedIn(token);
         when(jwtUtil.extractJti(token)).thenReturn("jti-current");
         when(jwtUtil.getRemainingTtlMillis(token)).thenReturn(840_000L);
 
@@ -84,11 +86,7 @@ class AuthServiceLogoutTest {
     @Test
     void logout_stillRevokesStoredRefreshTokens() {
         String token = "current.access.token";
-        authenticateAs("alice@example.com", token);
-        UUID userId = UUID.randomUUID();
-        User user = User.builder().username("alice@example.com").build();
-        user.setId(userId);
-        when(userRepository.findByUsername("alice@example.com")).thenReturn(Optional.of(user));
+        UUID userId = signedIn(token).getId();
         when(jwtUtil.extractJti(token)).thenReturn("jti-current");
         when(jwtUtil.getRemainingTtlMillis(token)).thenReturn(840_000L);
 
@@ -101,11 +99,7 @@ class AuthServiceLogoutTest {
     @Test
     void logout_writesTheRevocationCutoff() {
         String token = "current.access.token";
-        authenticateAs("alice@example.com", token);
-        UUID userId = UUID.randomUUID();
-        User user = User.builder().username("alice@example.com").build();
-        user.setId(userId);
-        when(userRepository.findByUsername("alice@example.com")).thenReturn(Optional.of(user));
+        UUID userId = signedIn(token).getId();
         when(jwtUtil.extractJti(token)).thenReturn("jti-current");
         when(jwtUtil.getRemainingTtlMillis(token)).thenReturn(840_000L);
 
@@ -119,11 +113,7 @@ class AuthServiceLogoutTest {
     @Test
     void logout_locksTheUserRowBeforeDeletingItsTokens() {
         String token = "current.access.token";
-        authenticateAs("alice@example.com", token);
-        UUID userId = UUID.randomUUID();
-        User user = User.builder().username("alice@example.com").build();
-        user.setId(userId);
-        when(userRepository.findByUsername("alice@example.com")).thenReturn(Optional.of(user));
+        UUID userId = signedIn(token).getId();
 
         authService.logout(null);
 
@@ -147,7 +137,7 @@ class AuthServiceLogoutTest {
 
         authService.logout("the.refresh.token");
 
-        verify(userRepository, never()).findByUsername(any());
+        verify(userRepository, never()).findLiveById(any());
         verify(tokenRepository).deleteAllByUserId(userId);
         verify(sessionRevoker).revokeAccessTokensAfterCommit(List.of(userId));
         verifyNoInteractions(tokenBlocklist);
@@ -156,11 +146,7 @@ class AuthServiceLogoutTest {
     @Test
     void logout_withRedisDown_stillEndsEverySession() {
         String token = "current.access.token";
-        authenticateAs("alice@example.com", token);
-        UUID userId = UUID.randomUUID();
-        User user = User.builder().username("alice@example.com").build();
-        user.setId(userId);
-        when(userRepository.findByUsername("alice@example.com")).thenReturn(Optional.of(user));
+        UUID userId = signedIn(token).getId();
         when(jwtUtil.extractJti(token)).thenReturn("jti-current");
         when(jwtUtil.getRemainingTtlMillis(token)).thenReturn(840_000L);
         StringRedisTemplate redisDown = mock(StringRedisTemplate.class);

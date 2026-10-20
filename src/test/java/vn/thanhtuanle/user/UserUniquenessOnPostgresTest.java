@@ -7,12 +7,17 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -25,18 +30,23 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import vn.thanhtuanle.auth.AuthService;
+import vn.thanhtuanle.auth.TokenHasher;
 import vn.thanhtuanle.auth.dto.ExchangeTokenResponse;
+import vn.thanhtuanle.common.enums.TokenType;
 import vn.thanhtuanle.common.enums.UserStatus;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.common.exception.UniqueUserConstraints;
 import vn.thanhtuanle.common.util.ClientMeta;
+import vn.thanhtuanle.common.util.JwtUtil;
+import vn.thanhtuanle.entity.Token;
 import vn.thanhtuanle.entity.User;
+import vn.thanhtuanle.oj.common.security.OjJwtDecoders;
 import vn.thanhtuanle.oj.common.web.error.AppException;
+import vn.thanhtuanle.repository.TokenRepository;
 
 import java.time.Instant;
 import java.util.Date;
 import java.util.HashSet;
-import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -45,6 +55,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -61,7 +73,19 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
 @Testcontainers(disabledWithoutDocker = true)
+@Import(UserUniquenessOnPostgresTest.PublicKeyDecoder.class)
 class UserUniquenessOnPostgresTest {
+
+    /** Real access tokens through the real filter: keyed with identity's public key (MockMvc has no JWKS server). */
+    @TestConfiguration
+    static class PublicKeyDecoder {
+        @Bean
+        JwtDecoder testJwtDecoder(JwtUtil jwtUtil) {
+            NimbusJwtDecoder decoder = NimbusJwtDecoder.withPublicKey(jwtUtil.getPublicKey()).build();
+            decoder.setJwtValidator(OjJwtDecoders.validator());
+            return decoder;
+        }
+    }
 
     @Container
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16");
@@ -81,6 +105,9 @@ class UserUniquenessOnPostgresTest {
     @Autowired UserRepository userRepository;
     @Autowired AuthService authService;
     @Autowired TransactionTemplate transactionTemplate;
+    @Autowired TokenRepository tokenRepository;
+    @Autowired JwtUtil jwtUtil;
+    @Autowired JdbcTemplate jdbc;
 
     /** Google's token endpoint. */
     @MockitoBean RestTemplate restTemplate;
@@ -169,9 +196,8 @@ class UserUniquenessOnPostgresTest {
      * the index refuses it at commit, and the admin gets the 409, not a 500.
      */
     @Test
-    @WithMockUser(username = "undelete_admin", authorities = "user:update")
     void reviving_aDeletedAccountWhoseUsernameIsTakenNow_is409() throws Exception {
-        saved("undelete_admin", unique("admin") + "@example.com");
+        User admin = saved(unique("undelete_admin"), unique("admin") + "@example.com");
         String username = unique("lena");
         User deleted = userRepository.save(User.builder().username(username).name(username)
                 .email(unique("lena.old") + "@example.com").password("{noop}unused")
@@ -179,6 +205,8 @@ class UserUniquenessOnPostgresTest {
         saved(username.toUpperCase(), unique("lena.new") + "@example.com");
 
         mockMvc.perform(patch("/api/v1/users/" + deleted.getId() + "/status").contentType(MediaType.APPLICATION_JSON)
+                        .with(jwt().jwt(token -> token.claim("uid", admin.getId().toString()))
+                                .authorities(new SimpleGrantedAuthority("user:update")))
                         .content("""
                                 {"status":1}"""))
                 .andExpect(status().isConflict())
@@ -230,7 +258,7 @@ class UserUniquenessOnPostgresTest {
      * new account's own requests (and its next sign-in) work.
      */
     @Test
-    void aGoogleAccountWithTheUsernameOfADeletedAccount_isTheOneItsUsernameFinds() {
+    void aGoogleAccountWithTheUsernameOfADeletedAccount_isTheOneItsUsernameFinds() throws Exception {
         String address = unique("kate") + "@uni.edu.vn";
         userRepository.save(User.builder().username(address).name("Kate").email(unique("kate.new") + "@uni.edu.vn")
                 .googleId(unique("sub")).status(UserStatus.DELETED.getValue()).roles(new HashSet<>()).build());
@@ -238,19 +266,47 @@ class UserUniquenessOnPostgresTest {
         googleAnswersFor(sub, address);
         ClientMeta meta = new ClientMeta("10.0.0.9", "dev-9", "pg/1.0");
 
-        assertThat(authService.authenticateGoogleUser("code", "verifier", "n-1", meta).getAccessToken()).isNotNull();
+        String accessToken = authService.authenticateGoogleUser("code", "verifier", "n-1", meta).getAccessToken();
 
         assertThat(userRepository.findByUsername(address)).get()
                 .extracting(User::getGoogleId, User::getStatus)
                 .containsExactly(sub, UserStatus.ACTIVE.getValue());
-        SecurityContextHolder.getContext().setAuthentication(
-                new UsernamePasswordAuthenticationToken(address, null, List.of()));
-        try {
-            assertThat(authService.me().getUsername()).isEqualTo(address);
-        } finally {
-            SecurityContextHolder.clearContext();
-        }
+        mockMvc.perform(get("/api/v1/auth/me").header("Authorization", "Bearer " + accessToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.username").value(address))
+                .andExpect(jsonPath("$.data.googleId").value(sub));
         assertThat(authService.authenticateGoogleUser("code", "verifier", "n-1", meta).getAccessToken()).isNotNull();
+    }
+
+    /**
+     * An admin soft-deleted an account and its revocation write failed (Redis was down a moment), then a new account
+     * took the same username. The deleted account's access token is still valid and names it by username ({@code sub})
+     * and by id ({@code uid}): identity resolves the caller by id, so the token acts as nobody, never as the new
+     * account. Its /auth/me is 401, its password change is 401, and its logout ends none of the new account's sessions.
+     */
+    @Test
+    void aStillValidTokenOfADeletedAccount_whoseUsernameWasTakenAgain_actsAsNobody() throws Exception {
+        String username = unique("mia");
+        User deleted = userRepository.save(User.builder().username(username).name("Mia").password("{noop}unused")
+                .email(unique("mia.old") + "@example.com").status(UserStatus.DELETED.getValue())
+                .roles(new HashSet<>()).build());
+        String token = jwtUtil.generateToken(deleted);
+        User reused = saved(username, unique("mia.new") + "@example.com");
+        tokenRepository.save(Token.builder().user(reused).token(TokenHasher.sha256Hex(unique("refresh")))
+                .tokenType(TokenType.REFRESH).build());
+
+        mockMvc.perform(get("/api/v1/auth/me").header("Authorization", "Bearer " + token))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(put("/api/v1/users/me/password").header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"currentPassword":"Unused123","newPassword":"Changed123"}"""))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/v1/auth/logout").header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk());
+
+        assertThat(jdbc.queryForObject("select count(*) from t_tokens where user_id = ?", Long.class, reused.getId()))
+                .as("the new account's sessions").isEqualTo(1);
     }
 
     /**
