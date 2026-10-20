@@ -44,6 +44,28 @@ class UniqueUserIdentityMigrationTest {
         assertThat(indexExists("ux_users_username_lower")).isFalse();
     }
 
+    /**
+     * Deploy day: identity's start failed on V6. Postgres rolled the migration back, history row included, so once the
+     * operator resolves the duplicate the next start migrates, with no {@code flyway repair}.
+     */
+    @Test
+    void onceTheDuplicateIsResolved_theNextStartMigratesWithoutRepair() throws SQLException {
+        cleanAndMigrate("5");
+        insertUser("Dora", "dora.one@example.com", null, ACTIVE);
+        insertUser("dora", "dora.two@example.com", null, ACTIVE);
+        assertThatThrownBy(() -> flyway("latest").migrate()).hasMessageContaining("username dora");
+
+        try (Connection c = connection();
+             PreparedStatement ps = c.prepareStatement("UPDATE t_users SET status = ? WHERE username = 'Dora'")) {
+            ps.setInt(1, DELETED);
+            ps.executeUpdate();
+        }
+
+        assertThatCode(() -> flyway("latest").migrate()).doesNotThrowAnyException();
+        assertThat(flyway("latest").info().current().getVersion().getVersion()).isEqualTo("6");
+        assertThat(indexExists("ux_users_username_lower")).isTrue();
+    }
+
     @Test
     void duplicateEmailsAndGoogleIdsBlockItToo() throws SQLException {
         cleanAndMigrate("5");

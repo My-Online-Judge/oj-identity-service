@@ -45,6 +45,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -161,6 +162,29 @@ class UserUniquenessOnPostgresTest {
         // Its login resolves the new account, not the deleted one.
         assertThat(userRepository.findByUsername(username)).get()
                 .extracting(User::getStatus).isEqualTo(UserStatus.ACTIVE.getValue());
+    }
+
+    /**
+     * Reviving a soft-deleted account (its status set back to active) whose username a live account has taken since:
+     * the index refuses it at commit, and the admin gets the 409, not a 500.
+     */
+    @Test
+    @WithMockUser(username = "undelete_admin", authorities = "user:update")
+    void reviving_aDeletedAccountWhoseUsernameIsTakenNow_is409() throws Exception {
+        saved("undelete_admin", unique("admin") + "@example.com");
+        String username = unique("lena");
+        User deleted = userRepository.save(User.builder().username(username).name(username)
+                .email(unique("lena.old") + "@example.com").password("{noop}unused")
+                .status(UserStatus.DELETED.getValue()).roles(new HashSet<>()).build());
+        saved(username.toUpperCase(), unique("lena.new") + "@example.com");
+
+        mockMvc.perform(patch("/api/v1/users/" + deleted.getId() + "/status").contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"status":1}"""))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value("Username already exists"));
+        assertThat(userRepository.findById(deleted.getId()).orElseThrow().getStatus())
+                .isEqualTo(UserStatus.DELETED.getValue());
     }
 
     /**
