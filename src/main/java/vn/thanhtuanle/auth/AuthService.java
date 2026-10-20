@@ -8,6 +8,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
@@ -25,6 +26,7 @@ import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.oj.common.web.error.AppException;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.common.util.JwtUtil;
+import vn.thanhtuanle.common.util.Sleeper;
 import vn.thanhtuanle.security.LoginAttemptService;
 import vn.thanhtuanle.security.LoginRateLimiter;
 import vn.thanhtuanle.entity.Token;
@@ -69,6 +71,8 @@ public class AuthService {
     private final LoginAttemptService loginAttemptService;
     private final SessionRevoker sessionRevoker;
     private final Clock clock;
+    private final Sleeper sleeper;
+    private final TransactionTemplate transactionTemplate;
 
     @Value("${application.security.jwt.refresh-token.expiration}")
     private long refreshTokenTtlMillis;
@@ -218,8 +222,12 @@ public class AuthService {
      * users have no password and fall through to the same generic error, so this endpoint can't
      * be used to tell a real username from a wrong password. Mirrors the Google flow's token
      * bookkeeping; the caller sets the returned tokens as HttpOnly cookies.
+     *
+     * <p>Deliberately not {@code @Transactional}: a failure sleeps the limiter's backoff (up to 8 s) before
+     * answering, and must hold neither a transaction nor a pooled connection meanwhile, or a credential
+     * spray would drain the pool and stall every other request. Only a success's writes run in a transaction.
+     * The connection part also needs {@code spring.jpa.open-in-view: false} (application.yml).
      */
-    @Transactional
     public AuthResponse authenticateWithPassword(String username, String password, ClientMeta meta) {
         loginRateLimiter.assertAllowed(username, meta);
 
@@ -233,11 +241,23 @@ public class AuthService {
                 throw new AppException(ErrorCode.USER_BLOCKED);
             }
         } catch (AppException e) {
-            loginRateLimiter.recordFailure(username, meta);
+            Duration backoff = loginRateLimiter.recordFailure(username, meta);
             loginAttemptService.record(username, meta, false, e.getErrorCode().name());
+            sleeper.sleep(backoff);
             throw e;
         }
 
+        AuthResponse tokens = transactionTemplate.execute(status -> startPasswordSession(user, meta));
+
+        loginRateLimiter.clear(username, meta);
+        loginAttemptService.record(username, meta, true, null);
+
+        log.info("Password login for user: {}", username);
+        return tokens;
+    }
+
+    /** A successful password login's writes: this login's tokens replace every earlier one. */
+    private AuthResponse startPasswordSession(User user, ClientMeta meta) {
         String accessToken = jwtUtil.generateToken(user);
         String refreshToken = jwtUtil.generateRefreshToken(user);
 
@@ -250,10 +270,6 @@ public class AuthService {
         user.setLastLoginDeviceHash(meta.deviceHash());
         userRepository.save(user);
 
-        loginRateLimiter.clear(username);
-        loginAttemptService.record(username, meta, true, null);
-
-        log.info("Password login for user: {}", username);
         return AuthResponse.builder()
                 .accessToken(accessToken)
                 .refreshToken(refreshToken)

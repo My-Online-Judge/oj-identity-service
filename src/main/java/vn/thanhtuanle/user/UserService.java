@@ -18,6 +18,7 @@ import vn.thanhtuanle.oj.common.web.payload.PageResponse;
 import vn.thanhtuanle.entity.Role;
 import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.repository.TokenRepository;
+import vn.thanhtuanle.security.LoginRateLimiter;
 import vn.thanhtuanle.user.dto.CreateUserRequest;
 import vn.thanhtuanle.user.dto.UpdateUserRequest;
 import vn.thanhtuanle.user.dto.UserResponse;
@@ -46,6 +47,7 @@ public class UserService {
     private final SessionRevoker sessionRevoker;
     private final TokenRepository tokenRepository;
     private final DefaultAdminPasswordGauge defaultAdminPasswordGauge;
+    private final LoginRateLimiter loginRateLimiter;
 
     /** A lazy reference by id — no query — for linking an entity to the user behind the request. */
     public User getReference(UUID id) {
@@ -176,11 +178,16 @@ public class UserService {
         log.info("Reset password for user {}", user.getUsername());
     }
 
-    /** Change the signed-in user's own password (SYS_ROOT included); every session of theirs ends. */
+    /**
+     * Change the signed-in user's own password (SYS_ROOT included); every session of theirs ends. Wrong current
+     * passwords are throttled like logins (5 per 5 minutes, then 429 for 15), so a stolen session cannot guess it.
+     */
     @Transactional
     public void changeOwnPassword(String current, String next) {
         User user = getCurrentUser();
+        loginRateLimiter.assertPasswordChangeAllowed(user.getId());
         if (!passwordEncoder.matches(current, user.getPassword())) {
+            loginRateLimiter.recordPasswordChangeFailure(user.getId());
             throw new AppException(ErrorCode.CURRENT_PASSWORD_INCORRECT);
         }
         if (next != null && next.equals(current)) {

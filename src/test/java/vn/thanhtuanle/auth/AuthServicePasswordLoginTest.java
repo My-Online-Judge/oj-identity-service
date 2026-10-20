@@ -3,10 +3,14 @@ package vn.thanhtuanle.auth;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.client.RestTemplate;
 import vn.thanhtuanle.auth.dto.AuthResponse;
 import vn.thanhtuanle.common.enums.CommonStatus;
@@ -14,6 +18,7 @@ import vn.thanhtuanle.oj.common.web.error.AppException;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.common.util.JwtUtil;
+import vn.thanhtuanle.common.util.Sleeper;
 import vn.thanhtuanle.entity.Token;
 import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.repository.TokenRepository;
@@ -23,6 +28,7 @@ import vn.thanhtuanle.user.RoleRepository;
 import vn.thanhtuanle.user.UserRepository;
 import vn.thanhtuanle.user.mapper.UserMapper;
 
+import java.time.Duration;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -44,6 +50,10 @@ class AuthServicePasswordLoginTest {
     @Mock PasswordEncoder passwordEncoder;
     @Mock LoginRateLimiter loginRateLimiter;
     @Mock LoginAttemptService loginAttemptService;
+    @Mock Sleeper sleeper;
+
+    private final PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
+    @Spy TransactionTemplate transactionTemplate = new TransactionTemplate(transactionManager);
 
     @InjectMocks AuthService authService;
 
@@ -132,8 +142,47 @@ class AuthServicePasswordLoginTest {
         authService.authenticateWithPassword("admin", "secret", META);
 
         verify(loginRateLimiter).assertAllowed(eq("admin"), any(ClientMeta.class));
-        verify(loginRateLimiter).clear("admin");
+        verify(loginRateLimiter).clear("admin", META);
         verify(loginAttemptService).record(eq("admin"), any(ClientMeta.class), eq(true), isNull());
+        verify(sleeper, never()).sleep(any());
+    }
+
+    @Test
+    void login_writesItsTokensInOneTransaction() {
+        User u = admin(CommonStatus.ACTIVE.getValue(), HASH);
+        when(userRepository.findByUsername("admin")).thenReturn(Optional.of(u));
+        when(passwordEncoder.matches("secret", HASH)).thenReturn(true);
+        when(jwtUtil.generateToken(u)).thenReturn("AT");
+        when(jwtUtil.generateRefreshToken(u)).thenReturn("RT");
+
+        authService.authenticateWithPassword("admin", "secret", META);
+
+        InOrder order = inOrder(userRepository, passwordEncoder, transactionManager, tokenRepository);
+        order.verify(userRepository).findByUsername("admin");
+        order.verify(passwordEncoder).matches("secret", HASH);
+        order.verify(transactionManager).getTransaction(any());
+        order.verify(tokenRepository).deleteAllByUserId(u.getId());
+        order.verify(tokenRepository, times(2)).save(any());
+        order.verify(userRepository).save(u);
+        order.verify(transactionManager).commit(any());
+    }
+
+    @Test
+    void badPassword_sleepsTheBackoffAfterRecordingIt_thenRejects() {
+        User u = admin(CommonStatus.ACTIVE.getValue(), HASH);
+        when(userRepository.findByUsername("admin")).thenReturn(Optional.of(u));
+        when(passwordEncoder.matches("wrong", HASH)).thenReturn(false);
+        when(loginRateLimiter.recordFailure("admin", META)).thenReturn(Duration.ofSeconds(4));
+
+        assertThatThrownBy(() -> authService.authenticateWithPassword("admin", "wrong", META))
+                .isInstanceOfSatisfying(AppException.class,
+                        e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USER_NOT_EXISTED));
+
+        InOrder order = inOrder(loginRateLimiter, loginAttemptService, sleeper);
+        order.verify(loginRateLimiter).recordFailure("admin", META);
+        order.verify(loginAttemptService).record("admin", META, false, "USER_NOT_EXISTED");
+        order.verify(sleeper).sleep(Duration.ofSeconds(4));
+        verifyNoInteractions(transactionManager);
     }
 
     @Test

@@ -43,6 +43,7 @@ class MetricPreRegistrationTest {
         new LoginRateLimiter(redis, registry);
 
         assertThat(registry.find("oj.login.rate_limited").counter()).isNotNull();
+        assertThat(registry.find("oj.redis.fallback").tag("lookup", "login").counter()).isNotNull();
     }
 
 }

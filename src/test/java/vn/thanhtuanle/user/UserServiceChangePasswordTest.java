@@ -15,7 +15,9 @@ import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.entity.Role;
 import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.oj.common.web.error.AppException;
+import vn.thanhtuanle.oj.common.web.error.RateLimitedException;
 import vn.thanhtuanle.repository.TokenRepository;
+import vn.thanhtuanle.security.LoginRateLimiter;
 import vn.thanhtuanle.user.mapper.UserMapper;
 
 import java.util.HashSet;
@@ -27,6 +29,8 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -41,6 +45,7 @@ class UserServiceChangePasswordTest {
     @Mock SessionRevoker sessionRevoker;
     @Mock TokenRepository tokenRepository;
     @Mock DefaultAdminPasswordGauge gauge;
+    @Mock LoginRateLimiter loginRateLimiter;
 
     @InjectMocks UserService userService;
 
@@ -105,6 +110,46 @@ class UserServiceChangePasswordTest {
         assertCode(() -> userService.changeOwnPassword("Nope1234", "NewPass12"), ErrorCode.CURRENT_PASSWORD_INCORRECT);
         verify(userRepository, never()).save(any());
         verify(tokenRepository, never()).deleteAllByUserId(any());
+    }
+
+    @Test
+    void wrongCurrentPassword_countsTowardsTheLock() {
+        signedIn("USER");
+        when(passwordEncoder.matches("Nope1234", "HASH")).thenReturn(false);
+
+        assertCode(() -> userService.changeOwnPassword("Nope1234", "NewPass12"), ErrorCode.CURRENT_PASSWORD_INCORRECT);
+
+        var order = inOrder(loginRateLimiter, passwordEncoder);
+        order.verify(loginRateLimiter).assertPasswordChangeAllowed(id);
+        order.verify(passwordEncoder).matches("Nope1234", "HASH");
+        order.verify(loginRateLimiter).recordPasswordChangeFailure(id);
+    }
+
+    @Test
+    void lockedUser_gets429BeforeThePasswordIsChecked() {
+        signedIn("USER");
+        doThrow(new RateLimitedException(ErrorCode.RATE_LIMITED, LoginRateLimiter.LOCK_SECONDS))
+                .when(loginRateLimiter).assertPasswordChangeAllowed(id);
+
+        assertThatThrownBy(() -> userService.changeOwnPassword("OldPass12", "NewPass12"))
+                .isInstanceOfSatisfying(RateLimitedException.class, e -> {
+                    assertThat(e.getErrorCode()).isEqualTo(ErrorCode.RATE_LIMITED);
+                    assertThat(e.getErrorCode().getStatusCode().value()).isEqualTo(429);
+                });
+        verify(passwordEncoder, never()).matches(any(), any());
+        verify(loginRateLimiter, never()).recordPasswordChangeFailure(any());
+        verify(userRepository, never()).save(any());
+    }
+
+    @Test
+    void rightCurrentPassword_isNotCounted() {
+        signedIn("USER");
+        when(passwordEncoder.matches("OldPass12", "HASH")).thenReturn(true);
+        when(passwordEncoder.encode("NewPass12")).thenReturn("NEW");
+
+        userService.changeOwnPassword("OldPass12", "NewPass12");
+
+        verify(loginRateLimiter, never()).recordPasswordChangeFailure(any());
     }
 
     @Test
