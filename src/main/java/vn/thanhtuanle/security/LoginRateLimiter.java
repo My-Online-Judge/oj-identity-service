@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Redis-backed brute-force lockout for password logins and for the current-password check of a password change.
@@ -222,17 +223,21 @@ public class LoginRateLimiter {
         }
     }
 
-    /** Throws 429 RATE_LIMITED while this user's password changes are locked after too many wrong current passwords. */
+    /**
+     * Throws 429 PASSWORD_CHANGE_RATE_LIMITED, with Retry-After = what is left of the lock, while this user's password
+     * changes are locked after too many wrong current passwords.
+     */
     public void assertPasswordChangeAllowed(UUID userId) {
-        boolean locked;
+        Long millisLeft;
         try {
-            locked = Boolean.TRUE.equals(redis.hasKey(LOCK_PREFIX + passwordChange(userId)));
+            millisLeft = redis.getExpire(LOCK_PREFIX + passwordChange(userId), TimeUnit.MILLISECONDS);
         } catch (Exception e) {
             failOpen("allowing password change", e);
             return;
         }
-        if (locked) {
-            throw new RateLimitedException(ErrorCode.RATE_LIMITED, LOCK_SECONDS);
+        // PTTL: -2 when there is no lock, -1 for one without a TTL (never written so).
+        if (millisLeft != null && millisLeft != -2) {
+            throw new RateLimitedException(ErrorCode.PASSWORD_CHANGE_RATE_LIMITED, retryAfterSeconds(millisLeft));
         }
     }
 

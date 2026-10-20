@@ -35,6 +35,7 @@ public enum ErrorCode implements ErrorCodeSpec {
     EMAIL_INVALID("Email is not valid", HttpStatus.BAD_REQUEST),
     USER_STATUS_INVALID("Status must be ACTIVE or DISABLED", HttpStatus.BAD_REQUEST),
     RATE_LIMITED("Too many failed login attempts. Try again later", HttpStatus.TOO_MANY_REQUESTS),
+    PASSWORD_CHANGE_RATE_LIMITED("Too many wrong current passwords. Try again later", HttpStatus.TOO_MANY_REQUESTS),
     ACCESS_BANNED("Access from this address or device is banned", HttpStatus.FORBIDDEN),
     BAN_EXISTED("This value is already banned", HttpStatus.CONFLICT),
     BAN_SELF("You cannot ban your own current IP or device", HttpStatus.CONFLICT),

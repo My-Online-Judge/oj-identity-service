@@ -263,10 +263,19 @@ class LoginRateLimiterRedisTest {
         limiter.recordPasswordChangeFailure(me);
 
         assertThatThrownBy(() -> limiter.assertPasswordChangeAllowed(me))
-                .isInstanceOfSatisfying(RateLimitedException.class, e ->
-                        assertThat(e.getRetryAfterSeconds()).isBetween(1L, LoginRateLimiter.LOCK_SECONDS));
+                .isInstanceOfSatisfying(RateLimitedException.class, e -> {
+                    // Its own message: this is not about failed logins.
+                    assertThat(e.getErrorCode()).isEqualTo(ErrorCode.PASSWORD_CHANGE_RATE_LIMITED);
+                    assertThat(e.getErrorCode().getStatusCode().value()).isEqualTo(429);
+                    assertThat(e.getRetryAfterSeconds()).isBetween(899L, 900L);
+                });
         assertThatCode(() -> limiter.assertPasswordChangeAllowed(someoneElse)).doesNotThrowAnyException();
         assertThat(ttl("oj:rl:login:pwchange:" + me)).isBetween(290L, 300L);
         assertThat(ttl("oj:rl:lock:pwchange:" + me)).isBetween(890L, 900L);
+
+        redis.expire("oj:rl:lock:pwchange:" + me, Duration.ofSeconds(42));
+        assertThatThrownBy(() -> limiter.assertPasswordChangeAllowed(me))
+                .isInstanceOfSatisfying(RateLimitedException.class, e ->
+                        assertThat(e.getRetryAfterSeconds()).isBetween(41L, 42L));
     }
 }

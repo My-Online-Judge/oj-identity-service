@@ -131,12 +131,12 @@ class UserServiceChangePasswordTest {
     @Test
     void lockedUser_gets429BeforeThePasswordIsChecked() {
         signedIn("USER");
-        doThrow(new RateLimitedException(ErrorCode.RATE_LIMITED, LoginRateLimiter.LOCK_SECONDS))
+        doThrow(new RateLimitedException(ErrorCode.PASSWORD_CHANGE_RATE_LIMITED, 600))
                 .when(loginRateLimiter).assertPasswordChangeAllowed(id);
 
         assertThatThrownBy(() -> userService.changeOwnPassword("OldPass12", "NewPass12"))
                 .isInstanceOfSatisfying(RateLimitedException.class, e -> {
-                    assertThat(e.getErrorCode()).isEqualTo(ErrorCode.RATE_LIMITED);
+                    assertThat(e.getErrorCode()).isEqualTo(ErrorCode.PASSWORD_CHANGE_RATE_LIMITED);
                     assertThat(e.getErrorCode().getStatusCode().value()).isEqualTo(429);
                 });
         verify(passwordEncoder, never()).matches(any(), any());
