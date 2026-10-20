@@ -173,6 +173,20 @@ class UserUniquenessOnPostgresTest {
         assertThat(userRepository.findById(other.getId()).orElseThrow().getEmail()).isNotEqualToIgnoringCase(email);
     }
 
+    /** The update's own row is not a conflict: changing only the case of an account's own email is accepted. */
+    @Test
+    @WithMockUser(authorities = "user:update")
+    void updateToACaseVariantOfItsOwnEmailIsAccepted() throws Exception {
+        String email = unique("ivan") + "@example.com";
+        User ivan = saved(unique("ivan"), "I" + email.substring(1));
+
+        mockMvc.perform(put("/api/v1/users/" + ivan.getId()).contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"email":"%s"}""".formatted(email)))
+                .andExpect(status().is2xxSuccessful());
+        assertThat(userRepository.findById(ivan.getId()).orElseThrow().getEmail()).isEqualTo(email);
+    }
+
     @Test
     @WithMockUser(authorities = "user:create")
     void theUsernameAndEmailOfADeletedAccountCanBeTakenAgain() throws Exception {

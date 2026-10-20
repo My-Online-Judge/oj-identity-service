@@ -224,6 +224,26 @@ class LoginRateLimiterRedisTest {
         assertRetryAfter("bob", "10.0.0.9", 119, 120);
     }
 
+    /**
+     * A probe's lock and a failure's lock refusing the same attempt: the answer is the longest wait, so a failure's
+     * 15 minutes are never hidden behind a probe's "retry in 2 s", whichever key comes first; and a failure's lock with
+     * less than 2 s left still answers 2.
+     */
+    @Test
+    void aProbeLockAndAFailureLockRefusingOneAttempt_answerTheLongerWait() {
+        redis.opsForValue().set("oj:rl:lock:pair:alice|10.0.0.1", "fail:x", Duration.ofMinutes(15));
+        redis.opsForValue().set("oj:rl:lock:account:alice", "probe:y", Duration.ofSeconds(60));
+        assertRetryAfter("alice", "10.0.0.1", 899, 900);
+
+        redis.opsForValue().set("oj:rl:lock:account:bob", "probe:y", Duration.ofSeconds(60));
+        redis.opsForValue().set("oj:rl:lock:ip:10.0.0.2", "fail:x", Duration.ofMinutes(15));
+        assertRetryAfter("bob", "10.0.0.2", 899, 900);
+
+        redis.opsForValue().set("oj:rl:lock:pair:carol|10.0.0.3", "fail:x", Duration.ofSeconds(1));
+        redis.opsForValue().set("oj:rl:lock:account:carol", "probe:y", Duration.ofSeconds(60));
+        assertRetryAfter("carol", "10.0.0.3", 2, 2);
+    }
+
     @Test
     void aFailureInFlightThatLocksAgain_survivesTheProbesSuccess() {
         fail("alice", "10.0.0.1", 4);
