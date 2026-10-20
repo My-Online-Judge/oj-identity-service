@@ -1,10 +1,16 @@
 package vn.thanhtuanle.security;
 
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.context.properties.source.ConfigurationPropertySources;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.env.StandardEnvironment;
+import org.springframework.core.env.SystemEnvironmentPropertySource;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -19,6 +25,7 @@ import vn.thanhtuanle.security.LoginRateLimiter.Attempt;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
@@ -26,16 +33,17 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * The lockout against a real Redis. Every attempt reserves its place in the pair, account and IP counters before the
+ * The lockout against a real Redis. Every attempt reserves its place in the pair and account counters before the
  * password is checked, so a burst cannot get past a limit. A lock per (username, IP) means a spray cannot lock the
- * victim out from elsewhere; the account and IP ceilings, the window and lock TTLs and the password-change limit
- * complete it.
+ * victim out from elsewhere; the account ceiling, the address's ceiling on failures (correct logins never count toward
+ * it), the window and lock TTLs and the password-change limit complete it.
  */
 @Testcontainers(disabledWithoutDocker = true)
 class LoginRateLimiterRedisTest {
@@ -66,7 +74,7 @@ class LoginRateLimiterRedisTest {
             connection.serverCommands().flushAll();
             return null;
         });
-        limiter = new LoginRateLimiter(redis, new SimpleMeterRegistry());
+        limiter = new LoginRateLimiter(redis, new SimpleMeterRegistry(), 30);
     }
 
     private static ClientMeta from(String ip) {
@@ -144,15 +152,46 @@ class LoginRateLimiterRedisTest {
     }
 
     @Test
-    void aHallBehindOneAddressThatSignsInAtOnce_isToldToRetryInTwoSeconds() {
-        // Thirty correct logins from one NAT address still in flight (BCrypt queued behind each other) ...
-        for (int i = 0; i < 30; i++) {
-            limiter.reserve("student" + i, from("10.0.0.1"));
+    void fortyConcurrentCorrectLoginsFromOneAddress_noneIsRefused() throws Exception {
+        // A hall behind one NAT address signs in at once: every login is in flight (BCrypt queued) at the same time.
+        int students = 40;
+        ExecutorService pool = Executors.newFixedThreadPool(students);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<Attempt>> results = new ArrayList<>();
+        try {
+            for (int i = 0; i < students; i++) {
+                String username = "student" + i;
+                results.add(pool.submit(() -> {
+                    start.await();
+                    return limiter.reserve(username, from("10.0.0.1"));
+                }));
+            }
+            start.countDown();
+            List<Attempt> admitted = new ArrayList<>();
+            for (Future<Attempt> result : results) {
+                admitted.add(result.get(10, TimeUnit.SECONDS)); // a refusal would surface as an ExecutionException
+            }
+            admitted.forEach(limiter::recordSuccess);
+        } finally {
+            pool.shutdownNow();
         }
-        // ... the 31st becomes the IP's probe, and the 32nd is refused only until that probe settles.
-        assertThat(limiter.reserve("student30", from("10.0.0.1")).ipProbe()).isTrue();
 
-        assertRetryAfter("student31", "10.0.0.1", 2, 2);
+        // Correct logins never count toward the address's limit, in flight or after.
+        assertThat(redis.hasKey("oj:rl:lock:ip:10.0.0.1")).isFalse();
+        assertThat(redis.hasKey("oj:rl:login:ip:10.0.0.1")).isFalse();
+        assertAllowed("student40", "10.0.0.1");
+    }
+
+    @Test
+    void anAddressCountsFailuresOnly() {
+        fail("alice", "10.0.0.1", 2);
+        for (int i = 0; i < 100; i++) {
+            limiter.recordSuccess(limiter.reserve("student" + i, from("10.0.0.1")));
+        }
+        Attempt inFlight = limiter.reserve("bob", from("10.0.0.1"));
+
+        assertThat(value("oj:rl:login:ip:10.0.0.1")).isEqualTo("2");
+        assertThat(inFlight.pairCount()).isEqualTo(1);
     }
 
     @Test
@@ -232,7 +271,38 @@ class LoginRateLimiterRedisTest {
     }
 
     @Test
-    void thirtyFailuresLockTheIp() {
+    void concurrentReservationsAdmitExactlyTheAccountLimitPlusOne() throws Exception {
+        int threads = 60;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<Boolean>> results = new ArrayList<>();
+        try {
+            for (int i = 0; i < threads; i++) {
+                String address = "10.3.0." + i;
+                Callable<Boolean> attempt = () -> {
+                    start.await();
+                    try {
+                        limiter.reserve("alice", from(address));
+                        return true;
+                    } catch (RateLimitedException refused) {
+                        return false;
+                    }
+                };
+                results.add(pool.submit(attempt));
+            }
+            start.countDown();
+            int admitted = 0;
+            for (Future<Boolean> result : results) {
+                admitted += result.get(10, TimeUnit.SECONDS) ? 1 : 0;
+            }
+            assertThat(admitted).as("the account's fifty plus one probe").isEqualTo(51);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void thirtyFailuresFromOneAddressLockIt_andTheThirtyFirstAttemptIsToldWhatIsLeftOfTheLock() {
         for (int i = 0; i < 29; i++) {
             fail("user" + i, "10.0.0.1");
         }
@@ -240,8 +310,70 @@ class LoginRateLimiterRedisTest {
 
         fail("user29", "10.0.0.1");
 
-        assertRefused("newuser", "10.0.0.1");
+        assertThat(value("oj:rl:lock:ip:10.0.0.1")).startsWith("fail:");
+        assertThat(ttl("oj:rl:lock:ip:10.0.0.1")).isBetween(890L, 900L);
+        assertRetryAfter("newuser", "10.0.0.1", 899, 900);
         assertAllowed("newuser", "10.0.0.2");
+    }
+
+    @Test
+    void theIpLimitIsTheConfiguredOne() {
+        LoginRateLimiter lab = new LoginRateLimiter(redis, new SimpleMeterRegistry(), 3);
+        lab.recordFailure(lab.reserve("user0", from("10.0.0.1")));
+        lab.recordFailure(lab.reserve("user1", from("10.0.0.1")));
+        assertThat(redis.hasKey("oj:rl:lock:ip:10.0.0.1")).isFalse();
+
+        lab.recordFailure(lab.reserve("user2", from("10.0.0.1")));
+
+        assertThatThrownBy(() -> lab.reserve("user3", from("10.0.0.1")))
+                .isInstanceOfSatisfying(RateLimitedException.class, e ->
+                        assertThat(e.getRetryAfterSeconds()).isBetween(899L, 900L));
+    }
+
+    /** The limiter as the application builds it, with this test's Redis and the given configuration. */
+    private ApplicationContextRunner application() {
+        return new ApplicationContextRunner()
+                .withBean(StringRedisTemplate.class, () -> redis)
+                .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
+                .withBean(LoginRateLimiter.class);
+    }
+
+    private static final AtomicInteger ADDRESSES = new AtomicInteger();
+
+    /** Whether {@code failures} failures from one fresh address lock it. */
+    private static boolean failuresLockAnAddress(LoginRateLimiter limiter, int failures) {
+        String address = "10.7.0." + ADDRESSES.incrementAndGet();
+        for (int i = 0; i < failures; i++) {
+            limiter.recordFailure(limiter.reserve("user" + i, from(address)));
+        }
+        return redis.hasKey("oj:rl:lock:ip:" + address);
+    }
+
+    @Test
+    void theIpLimitIsOjLoginIpLimit_settableAsOJ_LOGIN_IP_LIMIT_andThirtyByDefault() {
+        application().run(context -> {
+            LoginRateLimiter byDefault = context.getBean(LoginRateLimiter.class);
+            assertThat(failuresLockAnAddress(byDefault, 29)).isFalse();
+            assertThat(failuresLockAnAddress(byDefault, 30)).isTrue();
+        });
+        application().withPropertyValues("oj.login.ip-limit=3").run(context ->
+                assertThat(failuresLockAnAddress(context.getBean(LoginRateLimiter.class), 3)).isTrue());
+        // How .env.identity sets it: an environment variable, bound the way Spring Boot binds them.
+        application()
+                .withInitializer(context -> {
+                    ConfigurableEnvironment environment = context.getEnvironment();
+                    environment.getPropertySources().replace(
+                            StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+                            new SystemEnvironmentPropertySource(
+                                    StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+                                    Map.of("OJ_LOGIN_IP_LIMIT", "4")));
+                    ConfigurationPropertySources.attach(environment);
+                })
+                .run(context -> {
+                    LoginRateLimiter fromEnv = context.getBean(LoginRateLimiter.class);
+                    assertThat(failuresLockAnAddress(fromEnv, 3)).isFalse();
+                    assertThat(failuresLockAnAddress(fromEnv, 4)).isTrue();
+                });
     }
 
     @Test
@@ -367,14 +499,14 @@ class LoginRateLimiterRedisTest {
     }
 
     @Test
-    void aSuccessForgivesThePairAndHandsBackItsAccountAndIpPlaces() {
+    void aSuccessForgivesThePairAndHandsBackItsAccountPlace() {
         fail("alice", "10.0.0.1", 2);
         Attempt success = limiter.reserve("alice", from("10.0.0.1"));
 
         limiter.recordSuccess(success);
 
         assertThat(redis.hasKey("oj:rl:login:pair:alice|10.0.0.1")).isFalse();
-        // A success is not a failure: only the two failures still count.
+        // A success is not a failure: only the two failures still count (the address counted nothing else).
         assertThat(value("oj:rl:login:account:alice")).isEqualTo("2");
         assertThat(value("oj:rl:login:ip:10.0.0.1")).isEqualTo("2");
         assertThat(ttl("oj:rl:login:account:alice")).isBetween(3590L, 3600L);

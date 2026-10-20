@@ -43,7 +43,8 @@ import static org.mockito.Mockito.doAnswer;
  * Parallel guesses against one account from one address, with the real limiter on a real Redis (H2 for the rest).
  * Every attempt reserves its place before its password is checked, so only the pair's five and one probe get a BCrypt
  * check; the rest are refused at once instead of passing one look at the locks together. After a lock runs out, the
- * right password signs in again.
+ * right password signs in again. Correct logins never count toward the address's limit, so a hall behind one address
+ * signs in at once.
  */
 @SpringBootTest
 @ActiveProfiles("test")
@@ -117,6 +118,61 @@ class LoginBurstTest {
         assertThat(refused.get()).as("refused before their password was checked").isEqualTo(BURST - 6);
     }
 
+    /**
+     * A hall of 40 behind one NAT address signs in at "go", every password right. Every check is held until all 40
+     * have reached one or been refused, so they are all in flight at once: none is refused, because only failed
+     * checks count toward the address's limit (30).
+     */
+    @Test
+    void fortyConcurrentCorrectLoginsFromOneAddressAllSignIn() throws Exception {
+        int hall = 40;
+        String hash = passwordEncoder.encode("Secret123");
+        List<String> students = new ArrayList<>();
+        for (int i = 0; i < hall; i++) {
+            students.add(seedUser(hash));
+        }
+        AtomicInteger checked = new AtomicInteger();
+        AtomicInteger refused = new AtomicInteger();
+        AtomicInteger signedIn = new AtomicInteger();
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            checked.incrementAndGet();
+            release.await(20, TimeUnit.SECONDS);
+            return invocation.callRealMethod();
+        }).when(passwordEncoder).matches(any(), any());
+
+        ExecutorService pool = Executors.newFixedThreadPool(hall);
+        List<Future<?>> attempts = new ArrayList<>();
+        try {
+            for (String student : students) {
+                attempts.add(pool.submit(() -> {
+                    try {
+                        if (authService.authenticateWithPassword(student, "Secret123", META).getAccessToken() != null) {
+                            signedIn.incrementAndGet();
+                        }
+                    } catch (RateLimitedException e) {
+                        refused.incrementAndGet();
+                    }
+                    return null;
+                }));
+            }
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+            while (checked.get() + refused.get() < hall && System.nanoTime() < deadline) {
+                Thread.sleep(20);
+            }
+            release.countDown();
+            for (Future<?> attempt : attempts) {
+                attempt.get(30, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(refused.get()).as("refused").isZero();
+        assertThat(signedIn.get()).as("signed in").isEqualTo(hall);
+        assertThat(redis.hasKey("oj:rl:lock:ip:" + META.ip())).isFalse();
+    }
+
     @Test
     void afterTheAccountLockExpiresTheRightPasswordSignsIn() {
         String username = seedUser();
@@ -132,12 +188,16 @@ class LoginBurstTest {
     }
 
     private String seedUser() {
+        return seedUser(passwordEncoder.encode("Secret123"));
+    }
+
+    private String seedUser(String passwordHash) {
         String username = "burst_" + UUID.randomUUID().toString().substring(0, 8);
         userRepository.save(User.builder()
                 .username(username)
                 .name(username)
                 .email(username + "@example.com")
-                .password(passwordEncoder.encode("Secret123"))
+                .password(passwordHash)
                 .status(CommonStatus.ACTIVE.getValue())
                 .roles(new HashSet<>())
                 .build());

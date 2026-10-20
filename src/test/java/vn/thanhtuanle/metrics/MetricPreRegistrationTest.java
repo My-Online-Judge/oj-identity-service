@@ -40,7 +40,7 @@ class MetricPreRegistrationTest {
 
     @Test
     void loginRateLimiterHoldsItsCounter() {
-        new LoginRateLimiter(redis, registry);
+        new LoginRateLimiter(redis, registry, 30);
 
         assertThat(registry.find("oj.login.rate_limited").counter()).isNotNull();
         assertThat(registry.find("oj.redis.fallback").tag("lookup", "login").counter()).isNotNull();

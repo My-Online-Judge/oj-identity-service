@@ -3,6 +3,7 @@ package vn.thanhtuanle.security;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
@@ -19,26 +20,30 @@ import java.util.concurrent.TimeUnit;
 /**
  * Redis-backed brute-force lockout for password logins and for the current-password check of a password change.
  *
- * <p>Login attempts are counted per (username, IP) pair and per IP in a 5-minute window, and per account in a 1-hour
- * window ({@code oj:rl:login:*}). An attempt takes its place in all three counters <em>before</em> its password is
- * checked ({@link #reserve}), in one atomic script, so a burst of parallel guesses cannot all pass one look at the
- * locks:
+ * <p>Login attempts are counted per (username, IP) pair in a 5-minute window and per account in a 1-hour window
+ * ({@code oj:rl:login:*}). An attempt takes its place in both counters <em>before</em> its password is checked
+ * ({@link #reserve}), in one atomic script, so a burst of parallel guesses cannot all pass one look at the locks:
  * <ul>
- *   <li>a lock in force ({@code oj:rl:lock:} + the same suffix) refuses it with 429 and no password check;</li>
- *   <li>otherwise it is counted. The one that goes over a limit (5 per pair, 50 per account, 30 per IP) locks that key
- *       in the same step (for {@link #PROBE_LOCK_TTL} 60 s, until its failure makes it 15 minutes) and is let
- *       through as the single probe; everything after it is refused.</li>
+ *   <li>a lock in force ({@code oj:rl:lock:} + the same suffix), the IP's included, refuses it with 429 and no
+ *       password check;</li>
+ *   <li>otherwise it is counted. The one that goes over a limit (5 per pair, 50 per account) locks that key in the
+ *       same step (for {@link #PROBE_LOCK_TTL} 60 s, until its failure makes it 15 minutes) and is let through as the
+ *       single probe; everything after it is refused.</li>
  * </ul>
  * A failure keeps its places, and the failure that reaches a limit locks it ({@link #recordFailure}). A success hands
  * its places back, forgives its pair and lifts a lock it set as the probe ({@link #recordSuccess}). So a burst gets at
  * most limit + 1 password checks per key, and after a lock runs out one probe may try again: the right password signs
  * in, a wrong one locks for another 15 minutes.
  *
+ * <p>The IP counts failed password checks only (30 in 5 minutes by default, {@code oj.login.ip-limit}): a failure
+ * increments it, and the one that reaches the limit locks the address for 15 minutes. Correct logins never count, in
+ * flight or after, so a hall behind one NAT address that signs in at once is not refused, and a typo during that burst
+ * is one failure among the hall's, not a 15-minute lock for everyone.
+ *
  * <p>A lock's value says who set it: {@code probe:<random>} for the probe's, {@code fail:<random>} for a failure's. The
  * probe lifts only a lock that still holds its own value, so a failure still in flight that locked the key again keeps
  * its lock. A refusal answers what is left of a failure's lock, but "retry in 2 s" for a probe's: a probe usually
- * settles within a second, and correct logins in flight count too, so a hall behind one address that signs in at once
- * is not told to come back in 15 minutes.
+ * settles within a second.
  *
  * <p>Locking the pair, not the username, means a spray against alice from one address cannot lock alice out from her
  * own; the account and IP ceilings bound a distributed guess and a single-address spray. A pair's fourth and fifth
@@ -57,7 +62,6 @@ public class LoginRateLimiter {
     static final Duration ACCOUNT_WINDOW = Duration.ofHours(1);
     static final Duration LOCK = Duration.ofMinutes(15);
     static final int PAIR_LIMIT = 5;
-    static final int IP_LIMIT = 30;
     static final int ACCOUNT_LIMIT = 50;
     static final int PASSWORD_CHANGE_LIMIT = 5;
     static final Duration MAX_BACKOFF = Duration.ofSeconds(8);
@@ -76,30 +80,33 @@ public class LoginRateLimiter {
     public static final long LOCK_SECONDS = LOCK.toSeconds();
 
     /**
-     * KEYS: lock_1, counter_1, lock_2, counter_2, …  ARGV: limit_1, window_ms_1, limit_2, window_ms_2, …, then
-     * this attempt's probe token ({@code probe:<random>}), the probe's retry in ms and its lock's length in ms.
-     * Refused when a lock exists: {0, the longest wait among them}, where a failure's lock (any value not starting with
-     * {@code probe:}) waits its PTTL and a probe's the probe retry. Otherwise every counter is incremented (its window
-     * starts with its first attempt), and one that goes over its limit locks its key with the probe token for the
-     * probe's lock length (a failure sets the long lock): this attempt is
-     * the probe. Returns {1, count_1, …, count_n, probe_1, …, probe_n}.
+     * KEYS: lock_1, counter_1, …, lock_n, counter_n for the dimensions an attempt takes a place in (pair, account), then
+     * the locks that only refuse (the IP's, whose counter counts failures: {@link #COUNT_FAILURE}). ARGV: limit_1,
+     * window_ms_1, …, limit_n, window_ms_n, then this attempt's probe token ({@code probe:<random>}), the probe's retry
+     * in ms and its lock's length in ms; so n = (#ARGV - 3) / 2.
+     * Refused when any of the locks exists: {0, the longest wait among them}, where a failure's lock (any value not
+     * starting with {@code probe:}) waits its PTTL and a probe's the probe retry. Otherwise every counter is incremented
+     * (its window starts with its first attempt), and one that goes over its limit locks its key with the probe token
+     * for the probe's lock length (a failure sets the long lock): this attempt is the probe.
+     * Returns {1, count_1, …, count_n, probe_1, …, probe_n}.
      */
     @SuppressWarnings("rawtypes")
     private static final RedisScript<List> RESERVE = RedisScript.of("""
-            local dimensions = #KEYS / 2
+            local dimensions = (#ARGV - 3) / 2
             local probeToken = ARGV[2 * dimensions + 1]
             local probeRetryMs = tonumber(ARGV[2 * dimensions + 2])
             local probeLockMs = ARGV[2 * dimensions + 3]
             local refused, retry = false, 0
-            for i = 1, dimensions do
-              local lock = KEYS[2 * i - 1]
-              local holder = redis.call('GET', lock)
-              if holder then
-                refused = true
-                if string.sub(holder, 1, 6) == 'probe:' then
-                  retry = math.max(retry, probeRetryMs)
-                else
-                  retry = math.max(retry, redis.call('PTTL', lock))
+            for i = 1, #KEYS do
+              if i > 2 * dimensions or i % 2 == 1 then
+                local holder = redis.call('GET', KEYS[i])
+                if holder then
+                  refused = true
+                  if string.sub(holder, 1, 6) == 'probe:' then
+                    retry = math.max(retry, probeRetryMs)
+                  else
+                    retry = math.max(retry, redis.call('PTTL', KEYS[i]))
+                  end
                 end
               end
             end
@@ -122,6 +129,22 @@ public class LoginRateLimiter {
             end
             return result
             """, List.class);
+
+    /**
+     * KEYS[1]: a failure counter, KEYS[2]: its lock. ARGV: the limit, the window in ms, the failure's lock value and the
+     * lock's length in ms. Counts one failure (the window starts with the first) and locks at the limit. Returns the
+     * count.
+     */
+    private static final RedisScript<Long> COUNT_FAILURE = RedisScript.of("""
+            local count = redis.call('INCR', KEYS[1])
+            if count == 1 then
+              redis.call('PEXPIRE', KEYS[1], ARGV[2])
+            end
+            if count >= tonumber(ARGV[1]) then
+              redis.call('SET', KEYS[2], ARGV[3], 'PX', ARGV[4])
+            end
+            return count
+            """, Long.class);
 
     /**
      * KEYS: the counters an attempt hands back, then the locks it set as the probe. ARGV[1]: how many of KEYS are
@@ -148,26 +171,30 @@ public class LoginRateLimiter {
             """, Long.class);
 
     /**
-     * One login attempt's places in the counters, as {@link #reserve} took them: its ordinal in the pair, account and IP
+     * One login attempt's places in the counters, as {@link #reserve} took them: its ordinal in the pair and account
      * windows (0 for a dimension that was not counted: blank, or Redis was down), for each whether this attempt went
      * over the limit and locked it, i.e. is that key's probe, and the value it wrote into those locks ({@code null}
-     * when it is no key's probe).
+     * when it is no key's probe). It takes no place in the IP's counter, which counts failures only.
      */
-    public record Attempt(String username, String ip, long pairCount, long accountCount, long ipCount,
-                          boolean pairProbe, boolean accountProbe, boolean ipProbe, String probeToken) {
+    public record Attempt(String username, String ip, long pairCount, long accountCount,
+                          boolean pairProbe, boolean accountProbe, String probeToken) {
 
         /** An attempt that is no key's probe. */
-        public Attempt(String username, String ip, long pairCount, long accountCount, long ipCount) {
-            this(username, ip, pairCount, accountCount, ipCount, false, false, false, null);
+        public Attempt(String username, String ip, long pairCount, long accountCount) {
+            this(username, ip, pairCount, accountCount, false, false, null);
         }
     }
 
     private final StringRedisTemplate redis;
     private final Counter throttled;
     private final Counter fallbacks;
+    /** Failed password checks from one address in {@link #WINDOW} that lock it ({@code oj.login.ip-limit}). */
+    private final int ipLimit;
 
-    public LoginRateLimiter(StringRedisTemplate redis, MeterRegistry registry) {
+    public LoginRateLimiter(StringRedisTemplate redis, MeterRegistry registry,
+                            @Value("${oj.login.ip-limit:30}") int ipLimit) {
         this.redis = redis;
+        this.ipLimit = ipLimit;
         // Held for cheap increments; not a guarantee of an always-visible zero series (see the note
         // in SubmissionRateLimiter — alerts are absent-safe rather than relying on pre-registration).
         this.throttled = Counter.builder("oj.login.rate_limited")
@@ -192,7 +219,7 @@ public class LoginRateLimiter {
     }
 
     /**
-     * Takes this attempt's place in the pair, account and IP counters before its password is checked. Throws 429
+     * Takes this attempt's place in the pair and account counters before its password is checked. Throws 429
      * RATE_LIMITED when the pair, the account or the IP is locked, with Retry-After = the longest wait among the locks
      * refusing it: what is left of a failure's lock (at most 15 minutes), 2 s for a probe's. An attempt that goes over
      * a limit locks that key and is its probe.
@@ -200,8 +227,9 @@ public class LoginRateLimiter {
     @SuppressWarnings("unchecked")
     public Attempt reserve(String username, ClientMeta meta) {
         List<Dimension> dimensions = dimensions(username, meta.ip());
-        if (dimensions.isEmpty()) {
-            return new Attempt(username, meta.ip(), 0, 0, 0);
+        String address = ip(meta.ip());
+        if (dimensions.isEmpty() && address == null) {
+            return new Attempt(username, meta.ip(), 0, 0);
         }
         List<String> keys = new ArrayList<>();
         List<String> args = new ArrayList<>();
@@ -210,6 +238,9 @@ public class LoginRateLimiter {
             keys.add(COUNT_PREFIX + d.suffix());
             args.add(String.valueOf(d.limit()));
             args.add(String.valueOf(d.window().toMillis()));
+        }
+        if (address != null) {
+            keys.add(LOCK_PREFIX + address);
         }
         String probeToken = PROBE_LOCK + UUID.randomUUID();
         args.add(probeToken);
@@ -220,10 +251,10 @@ public class LoginRateLimiter {
             result = redis.execute(RESERVE, keys, args.toArray());
         } catch (Exception e) {
             failOpen("allowing login", e);
-            return new Attempt(username, meta.ip(), 0, 0, 0);
+            return new Attempt(username, meta.ip(), 0, 0);
         }
         if (result == null || result.isEmpty()) {
-            return new Attempt(username, meta.ip(), 0, 0, 0);
+            return new Attempt(username, meta.ip(), 0, 0);
         }
         if (result.get(0) == 0L) {
             throttled.increment();
@@ -237,23 +268,23 @@ public class LoginRateLimiter {
             counts[kind] = result.get(1 + i);
             probes[kind] = result.size() > 1 + n + i && result.get(1 + n + i) == 1L;
         }
-        boolean probe = probes[Kind.PAIR.ordinal()] || probes[Kind.ACCOUNT.ordinal()] || probes[Kind.IP.ordinal()];
+        boolean probe = probes[Kind.PAIR.ordinal()] || probes[Kind.ACCOUNT.ordinal()];
         return new Attempt(username, meta.ip(), counts[Kind.PAIR.ordinal()], counts[Kind.ACCOUNT.ordinal()],
-                counts[Kind.IP.ordinal()], probes[Kind.PAIR.ordinal()], probes[Kind.ACCOUNT.ordinal()],
-                probes[Kind.IP.ordinal()], probe ? probeToken : null);
+                probes[Kind.PAIR.ordinal()], probes[Kind.ACCOUNT.ordinal()], probe ? probeToken : null);
     }
 
     /**
      * A failed attempt keeps its places, and a lock it set as the probe stays. The one that reached a limit locks that
-     * pair, account or IP. Returns the delay: {@link #backoff} of its pair count, or none above the pair limit (such an
-     * attempt is a probe, or got past a lock that is in force by now: delaying it would only hold a worker thread).
+     * pair or account. The failure is counted for its IP, and the one that reaches the IP limit locks the address.
+     * Returns the delay: {@link #backoff} of its pair count, or none above the pair limit (such an attempt is a probe,
+     * or got past a lock that is in force by now: delaying it would only hold a worker thread).
      */
     public Duration recordFailure(Attempt attempt) {
         String failToken = FAIL_LOCK + UUID.randomUUID();
         try {
             lockAtLimit(pair(attempt.username(), attempt.ip()), attempt.pairCount(), PAIR_LIMIT, failToken);
             lockAtLimit(account(attempt.username()), attempt.accountCount(), ACCOUNT_LIMIT, failToken);
-            lockAtLimit(ip(attempt.ip()), attempt.ipCount(), IP_LIMIT, failToken);
+            countIpFailure(attempt.ip(), failToken);
         } catch (Exception e) {
             failOpen("lock not set", e);
         }
@@ -261,9 +292,9 @@ public class LoginRateLimiter {
     }
 
     /**
-     * A success is not a failure: it hands its account and IP places back, forgives its pair's earlier typos (the pair
-     * counter is deleted) and lifts any lock it set as the probe. Earlier failures still count against the account and
-     * the IP. A lock that a failure set again meanwhile stays.
+     * A success is not a failure: it hands its account place back, forgives its pair's earlier typos (the pair counter
+     * is deleted) and lifts any lock it set as the probe. Earlier failures still count against the account and the IP.
+     * A lock that a failure set again meanwhile stays.
      */
     public void recordSuccess(Attempt attempt) {
         settle(attempt, true);
@@ -280,17 +311,13 @@ public class LoginRateLimiter {
     private void settle(Attempt attempt, boolean success) {
         String pair = pair(attempt.username(), attempt.ip());
         String account = account(attempt.username());
-        String ip = ip(attempt.ip());
-        List<String> counters = new ArrayList<>(3);
+        List<String> counters = new ArrayList<>(2);
         boolean deletePair = success && pair != null;
         if (pair != null && (success || attempt.pairCount() > 0)) {
             counters.add(COUNT_PREFIX + pair);
         }
         if (account != null && attempt.accountCount() > 0) {
             counters.add(COUNT_PREFIX + account);
-        }
-        if (ip != null && attempt.ipCount() > 0) {
-            counters.add(COUNT_PREFIX + ip);
         }
         List<String> keys = new ArrayList<>(counters);
         String probeToken = attempt.probeToken();
@@ -300,9 +327,6 @@ public class LoginRateLimiter {
             }
             if (attempt.accountProbe() && account != null) {
                 keys.add(LOCK_PREFIX + account);
-            }
-            if (attempt.ipProbe() && ip != null) {
-                keys.add(LOCK_PREFIX + ip);
             }
         }
         if (keys.isEmpty()) {
@@ -362,6 +386,15 @@ public class LoginRateLimiter {
         }
     }
 
+    /** Counts a failed password check for its address; the one that reaches the IP limit locks the address. */
+    private void countIpFailure(String ip, String failToken) {
+        String suffix = ip(ip);
+        if (suffix != null) {
+            redis.execute(COUNT_FAILURE, List.of(COUNT_PREFIX + suffix, LOCK_PREFIX + suffix), String.valueOf(ipLimit),
+                    String.valueOf(WINDOW.toMillis()), failToken, String.valueOf(LOCK.toMillis()));
+        }
+    }
+
     /** Whole seconds, rounded up, never below 1: a client told 0 would retry at once. */
     private static long retryAfterSeconds(Long millis) {
         if (millis == null || millis <= 0) {
@@ -370,13 +403,14 @@ public class LoginRateLimiter {
         return Math.max(1, (millis + 999) / 1000);
     }
 
-    private enum Kind { PAIR, ACCOUNT, IP }
+    private enum Kind { PAIR, ACCOUNT }
 
     private record Dimension(Kind kind, String suffix, int limit, Duration window) {
     }
 
+    /** The dimensions an attempt takes a place in before its password is checked (not the IP: it counts failures). */
     private static List<Dimension> dimensions(String username, String ip) {
-        List<Dimension> dimensions = new ArrayList<>(3);
+        List<Dimension> dimensions = new ArrayList<>(2);
         String pair = pair(username, ip);
         if (pair != null) {
             dimensions.add(new Dimension(Kind.PAIR, pair, PAIR_LIMIT, WINDOW));
@@ -384,10 +418,6 @@ public class LoginRateLimiter {
         String account = account(username);
         if (account != null) {
             dimensions.add(new Dimension(Kind.ACCOUNT, account, ACCOUNT_LIMIT, ACCOUNT_WINDOW));
-        }
-        String address = ip(ip);
-        if (address != null) {
-            dimensions.add(new Dimension(Kind.IP, address, IP_LIMIT, WINDOW));
         }
         return dimensions;
     }

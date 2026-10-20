@@ -51,7 +51,7 @@ class LoginRateLimiterTest {
     void setUp() {
         registry = new SimpleMeterRegistry();
         when(redis.opsForValue()).thenReturn(valueOps);
-        limiter = new LoginRateLimiter(redis, registry);
+        limiter = new LoginRateLimiter(redis, registry, 30);
     }
 
     private double fallbacks() {
@@ -78,49 +78,77 @@ class LoginRateLimiterTest {
 
     @Test
     void aFailureIsDelayedByItsPairCount_notByTheAccountOrIp() {
-        assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 4, 40, 20))).isEqualTo(Duration.ofSeconds(2));
-        assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 5, 1, 1))).isEqualTo(Duration.ofSeconds(4));
+        assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 4, 40))).isEqualTo(Duration.ofSeconds(2));
+        assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 5, 1))).isEqualTo(Duration.ofSeconds(4));
     }
 
     @Test
     void aFailurePastThePairLimitIsAnsweredAtOnce() {
         // It got past a lock that is in force by now: delaying it would only hold a worker thread.
-        assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 6, 6, 6))).isZero();
-        assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 200, 200, 200))).isZero();
+        assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 6, 6))).isZero();
+        assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 200, 200))).isZero();
     }
 
     @Test
     void theFailureThatReachesALimitLocksIt() {
-        limiter.recordFailure(new Attempt("alice", "1.2.3.4", 5, 50, 29));
+        limiter.recordFailure(new Attempt("alice", "1.2.3.4", 5, 50));
 
         // A failure's lock is told apart from a probe's, so a probe that succeeds later cannot lift it.
         verify(valueOps).set(eq("oj:rl:lock:pair:alice|1.2.3.4"), startsWith("fail:"), eq(Duration.ofMinutes(15)));
         verify(valueOps).set(eq("oj:rl:lock:account:alice"), startsWith("fail:"), eq(Duration.ofMinutes(15)));
-        verify(valueOps, never()).set(org.mockito.ArgumentMatchers.eq("oj:rl:lock:ip:1.2.3.4"), anyString(),
-                any(Duration.class));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void aFailureIsCountedForItsAddress_whichLocksAtTheConfiguredLimit() {
+        new LoginRateLimiter(redis, registry, 300).recordFailure(new Attempt("alice", "1.2.3.4", 1, 1));
+
+        ArgumentCaptor<List<String>> keys = ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<Object[]> args = ArgumentCaptor.forClass(Object[].class);
+        verify(redis).execute(any(RedisScript.class), keys.capture(), args.capture());
+        assertThat(keys.getValue()).containsExactly("oj:rl:login:ip:1.2.3.4", "oj:rl:lock:ip:1.2.3.4");
+        // limit, window, the failure's lock value and the lock's length
+        assertThat(args.getValue()).hasSize(4);
+        assertThat(args.getValue()[0]).isEqualTo("300");
+        assertThat(args.getValue()[1]).isEqualTo("300000");
+        assertThat((String) args.getValue()[2]).startsWith("fail:");
+        assertThat(args.getValue()[3]).isEqualTo("900000");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void aReservationChecksTheAddressForALock_butTakesNoPlaceInItsCounter() {
+        scriptAnswers(List.of(1L, 3L, 12L, 0L, 0L));
+
+        limiter.reserve("alice", META);
+
+        ArgumentCaptor<List<String>> keys = ArgumentCaptor.forClass(List.class);
+        verify(redis).execute(any(RedisScript.class), keys.capture(), any(Object[].class));
+        assertThat(keys.getValue()).containsExactly(
+                "oj:rl:lock:pair:alice|1.2.3.4", "oj:rl:login:pair:alice|1.2.3.4",
+                "oj:rl:lock:account:alice", "oj:rl:login:account:alice",
+                "oj:rl:lock:ip:1.2.3.4");
     }
 
     @Test
     void aReservationReturnsTheCountsOfThisAttempt() {
-        scriptAnswers(List.of(1L, 3L, 12L, 7L, 0L, 0L, 0L));
+        scriptAnswers(List.of(1L, 3L, 12L, 0L, 0L));
 
         Attempt attempt = limiter.reserve("alice", META);
 
-        assertThat(attempt).isEqualTo(new Attempt("alice", "1.2.3.4", 3, 12, 7));
+        assertThat(attempt).isEqualTo(new Attempt("alice", "1.2.3.4", 3, 12));
     }
 
     @Test
     void aReservationThatWentOverALimitIsItsProbe_andKnowsItsLock() {
-        scriptAnswers(List.of(1L, 6L, 12L, 7L, 1L, 0L, 0L));
+        scriptAnswers(List.of(1L, 6L, 12L, 1L, 0L));
 
         Attempt attempt = limiter.reserve("alice", META);
 
         assertThat(attempt.pairCount()).isEqualTo(6);
         assertThat(attempt.accountCount()).isEqualTo(12);
-        assertThat(attempt.ipCount()).isEqualTo(7);
         assertThat(attempt.pairProbe()).isTrue();
         assertThat(attempt.accountProbe()).isFalse();
-        assertThat(attempt.ipProbe()).isFalse();
         // The value the script wrote into the lock it set, so its success or release lifts that lock only.
         ArgumentCaptor<Object[]> args = ArgumentCaptor.forClass(Object[].class);
         verify(redis).execute(any(RedisScript.class), anyList(), args.capture());
@@ -129,7 +157,7 @@ class LoginRateLimiterTest {
 
     @Test
     void probeTokensAreUnique() {
-        scriptAnswers(List.of(1L, 6L, 12L, 7L, 1L, 0L, 0L));
+        scriptAnswers(List.of(1L, 6L, 12L, 1L, 0L));
 
         assertThat(limiter.reserve("alice", META).probeToken()).isNotEqualTo(limiter.reserve("alice", META).probeToken());
     }
@@ -169,10 +197,10 @@ class LoginRateLimiterTest {
 
         Attempt unreserved = limiter.reserve("alice", META);
         assertThat(unreserved.pairCount()).isZero();
-        assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 5, 1, 1))).isEqualTo(Duration.ofSeconds(4));
-        assertThatCode(() -> limiter.recordSuccess(new Attempt("alice", "1.2.3.4", 1, 1, 1)))
+        assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 5, 1))).isEqualTo(Duration.ofSeconds(4));
+        assertThatCode(() -> limiter.recordSuccess(new Attempt("alice", "1.2.3.4", 1, 1)))
                 .doesNotThrowAnyException();
-        assertThatCode(() -> limiter.release(new Attempt("alice", "1.2.3.4", 1, 1, 1)))
+        assertThatCode(() -> limiter.release(new Attempt("alice", "1.2.3.4", 1, 1)))
                 .doesNotThrowAnyException();
         assertThatCode(() -> limiter.assertPasswordChangeAllowed(userId)).doesNotThrowAnyException();
         assertThatCode(() -> limiter.recordPasswordChangeFailure(userId)).doesNotThrowAnyException();

@@ -65,7 +65,7 @@ class AuthServicePasswordLoginTest {
 
     private static final String HASH = "$2a$10$hash";
     private static final ClientMeta META = new ClientMeta("1.2.3.4", "dev-1", "probe/1.0");
-    private static final Attempt ATTEMPT = new Attempt("admin", "1.2.3.4", 4, 4, 4);
+    private static final Attempt ATTEMPT = new Attempt("admin", "1.2.3.4", 4, 4);
 
     @BeforeEach
     void reservesEveryAttempt() {
