@@ -9,6 +9,7 @@ import org.mockito.Mock;
 import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.test.util.ReflectionTestUtils;
 import vn.thanhtuanle.auth.dto.AuthResponse;
 import vn.thanhtuanle.oj.common.web.payload.ApiResponse;
 import vn.thanhtuanle.common.util.ClientMeta;
@@ -40,6 +41,8 @@ class AuthControllerRefreshTest {
     void setUp() {
         response = new MockHttpServletResponse();
         request = mock(HttpServletRequest.class);
+        // JWT_ACCESS_TOKEN_EXPIRATION, as Spring binds it.
+        ReflectionTestUtils.setField(controller, "accessTokenTtlMillis", 900_000L);
     }
 
     @Test
@@ -54,6 +57,8 @@ class AuthControllerRefreshTest {
 
         // The endpoint sets the cookies itself -- that's the only thing the caller needs.
         assertThat(response.getCookie("accessToken").getValue()).isEqualTo("new-access-token");
+        // The access cookie goes when its token does.
+        assertThat(response.getCookie("accessToken").getMaxAge()).isEqualTo(900);
         Cookie refresh = Arrays.stream(response.getCookies())
                 .filter(c -> c.getName().equals("refreshToken") && c.getMaxAge() > 0)
                 .findFirst().orElseThrow();

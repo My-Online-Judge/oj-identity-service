@@ -107,6 +107,22 @@ class AuthCookieAttributesTest {
     }
 
     @Nested
+    @TestPropertySource(properties = "application.security.jwt.expiration=900000")
+    class WithFifteenMinuteAccessTokens {
+
+        @Autowired MockMvc ttlMockMvc;
+        @Autowired AuthService ttlAuthService;
+
+        /** The access cookie lives exactly as long as its token, not a day; the refresh cookie keeps its 7 days. */
+        @Test
+        void theAccessCookieLivesAsLongAsTheAccessToken() throws Exception {
+            assertThat(loginSetCookies(ttlMockMvc, ttlAuthService))
+                    .anySatisfy(h -> assertThat(h).startsWith("accessToken=AT;").contains("; Max-Age=900;"))
+                    .anySatisfy(h -> assertThat(h).startsWith("refreshToken=RT;").contains("; Max-Age=604800;"));
+        }
+    }
+
+    @Nested
     @TestPropertySource(properties = "app.cookie.secure=true")
     class BehindHttps {
 

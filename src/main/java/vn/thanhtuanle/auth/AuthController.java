@@ -22,6 +22,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.Map;
 
 @RestController
@@ -38,7 +39,6 @@ public class AuthController {
     private static final String GOOGLE_OUTBOUND = "/outbound/google";
     /** The outbound call and its callback; nothing else ever receives the OAuth cookies. The edge forwards it as is. */
     private static final String OAUTH_COOKIE_PATH = Routes.AUTH + GOOGLE_OUTBOUND;
-    private static final int ACCESS_TOKEN_MAX_AGE = 24 * 60 * 60; // 1 day
     private static final int REFRESH_TOKEN_MAX_AGE = 7 * 24 * 60 * 60; // 7 days
     private static final int OAUTH_COOKIE_MAX_AGE = 5 * 60; // one login round-trip
 
@@ -55,6 +55,13 @@ public class AuthController {
      */
     @Value("${app.base-url:http://localhost:5173}")
     private String appBaseUrl;
+
+    /**
+     * The access token's lifetime ({@code JWT_ACCESS_TOKEN_EXPIRATION}). Its cookie lives exactly as long, so the
+     * browser stops sending a token that can only be refused.
+     */
+    @Value("${application.security.jwt.expiration}")
+    private long accessTokenTtlMillis;
 
     @Operation(summary = "Get Google Auth URL", description = "Get URL to redirect user to Google Login")
     @GetMapping(GOOGLE_OUTBOUND)
@@ -176,7 +183,8 @@ public class AuthController {
     }
 
     private void writeSession(HttpServletResponse response, AuthResponse auth) {
-        authCookies.writeAccess(response, auth.getAccessToken(), ACCESS_TOKEN_MAX_AGE);
+        authCookies.writeAccess(response, auth.getAccessToken(),
+                Math.toIntExact(Duration.ofMillis(accessTokenTtlMillis).toSeconds()));
         authCookies.writeRefresh(response, auth.getRefreshToken(), REFRESH_TOKEN_MAX_AGE);
     }
 
