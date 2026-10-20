@@ -310,6 +310,43 @@ class TokenMutationRaceTest {
                         TokenHasher.sha256Hex(signedIn.getRefreshToken()));
     }
 
+    @Test
+    void twoFirstGoogleSignInsOfOneNewAccount_bothSignInToTheOneAccount() throws Exception {
+        String email = "new_" + UUID.randomUUID().toString().substring(0, 8) + "@example.com";
+        // One Google account (one sub), signing in for the first time from two tabs at once.
+        String idToken = googleIdToken(email, "race-nonce");
+        when(restTemplate.postForEntity(anyString(), any(HttpEntity.class), eq(ExchangeTokenResponse.class)))
+                .thenReturn(ResponseEntity.ok(ExchangeTokenResponse.builder().idToken(idToken).build()));
+        CountDownLatch inserted = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        // Pause the first sign-in after it inserted the new account, before it commits.
+        doAnswer(invocation -> {
+            if (Thread.currentThread().getName().equals("race-first")) {
+                inserted.countDown();
+                release.await(20, TimeUnit.SECONDS);
+            }
+            return invocation.callRealMethod();
+        }).when(jwtUtil).generateToken(any());
+
+        Future<AuthResponse> a = first.submit(
+                () -> authService.authenticateGoogleUser("code", "verifier", "race-nonce", META));
+        assertThat(inserted.await(10, TimeUnit.SECONDS)).isTrue();
+        // The second found no account either; its insert waits on the first's uncommitted username.
+        Future<AuthResponse> b = second.submit(
+                () -> authService.authenticateGoogleUser("code", "verifier", "race-nonce", META));
+        awaitLockWaiters(1);
+        release.countDown();
+
+        assertThat(a.get(20, TimeUnit.SECONDS).getAccessToken()).isNotNull();
+        // The loser signs in to the account the winner created, instead of being told the username is taken.
+        AuthResponse loser = b.get(20, TimeUnit.SECONDS);
+        assertThat(loser.getAccessToken()).isNotNull();
+        UUID account = jdbc.queryForObject("select id from t_users where lower(email) = lower(?)", UUID.class, email);
+        assertThat(jdbc.queryForList("select token from t_tokens where user_id = ?", String.class, account))
+                .containsExactlyInAnyOrder(
+                        TokenHasher.sha256Hex(loser.getAccessToken()), TokenHasher.sha256Hex(loser.getRefreshToken()));
+    }
+
     /** What Google's token endpoint returns for a verified account with this email. */
     private String googleIdToken(String email, String nonce) {
         return new PlainJWT(new JWTClaimsSet.Builder()

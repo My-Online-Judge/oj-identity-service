@@ -193,8 +193,7 @@ public class AuthService {
 
         AuthResponse tokens;
         try {
-            GoogleMatch match = googleAccount(google);
-            tokens = inGoogleSessionTransaction(() -> startGoogleSession(match, google, meta));
+            tokens = googleSession(google, meta);
         } catch (AppException e) {
             // The transaction has rolled back and released the row lock: the audit (REQUIRES_NEW) waits for a pooled
             // connection of its own, and must not keep the user locked while it does.
@@ -204,6 +203,30 @@ public class AuthService {
 
         loginAttemptService.record(google.email(), meta, true, null);
         return tokens;
+    }
+
+    /**
+     * Finds the account and runs the sign-in's writes. When no account was found and a unique index on users refuses
+     * the new one, an account may have been committed meanwhile (the same Google account's first sign-in from another
+     * tab won the race): the account is looked up once more, and the sign-in goes to the one found. With none found,
+     * the refusal stands.
+     */
+    private AuthResponse googleSession(GoogleIdentity google, ClientMeta meta) {
+        GoogleMatch match = googleAccount(google);
+        try {
+            return inGoogleSessionTransaction(() -> startGoogleSession(match, google, meta));
+        } catch (AppException e) {
+            if (match.userId() != null || !UniqueUserConstraints.isConflict(e.getErrorCode())) {
+                throw e;
+            }
+            GoogleMatch again = googleAccount(google);
+            if (again.userId() == null) {
+                throw e;
+            }
+            log.info("Google login: the new account conflicted with one committed meanwhile ({}); signing in to it",
+                    e.getErrorCode().name());
+            return inGoogleSessionTransaction(() -> startGoogleSession(again, google, meta));
+        }
     }
 
     /**

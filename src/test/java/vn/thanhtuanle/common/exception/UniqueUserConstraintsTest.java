@@ -34,6 +34,12 @@ class UniqueUserConstraintsTest {
     }
 
     @Test
+    void theirCodesAreConflicts_andNoOtherIs() {
+        assertThat(ErrorCode.values()).filteredOn(UniqueUserConstraints::isConflict).containsExactlyInAnyOrder(
+                ErrorCode.USERNAME_EXISTED, ErrorCode.EMAIL_EXISTED, ErrorCode.GOOGLE_ACCOUNT_EXISTED);
+    }
+
+    @Test
     void theNameIsFoundDeeperInTheCauseChain() {
         DataIntegrityViolationException wrapped = new DataIntegrityViolationException("outer",
                 new RuntimeException("middle", violationOf("ux_users_email_lower").getCause()));
