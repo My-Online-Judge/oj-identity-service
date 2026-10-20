@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import vn.thanhtuanle.entity.User;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -65,6 +66,18 @@ public interface UserRepository extends JpaRepository<User, UUID>, JpaSpecificat
      */
     @Query("select count(u) > 0 from User u where u.googleId = :googleId or lower(u.email) = lower(:email)")
     boolean existsByGoogleIdOrEmailIgnoreCase(@Param("googleId") String googleId, @Param("email") String email);
+
+    /**
+     * The live account (status not 2) with this username in any case, for public profiles. V6's
+     * {@code ux_users_username_lower} allows at most one such row, so a deleted account that kept the name never
+     * shadows it. Case is folded with {@code lower()}, like the index.
+     */
+    @Query("select u from User u where lower(u.username) = lower(:username) and u.status <> 2")
+    Optional<User> findLiveByUsernameIgnoreCase(@Param("username") String username);
+
+    /** The live accounts (status not 2) among these ids, for public profiles. */
+    @Query("select u from User u where u.id in :ids and u.status <> 2")
+    List<User> findLiveByIdIn(@Param("ids") Collection<UUID> ids);
 
     long countByRoles_Id(UUID roleId);
 

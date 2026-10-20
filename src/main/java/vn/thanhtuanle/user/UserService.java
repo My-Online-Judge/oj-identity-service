@@ -22,7 +22,9 @@ import vn.thanhtuanle.entity.Role;
 import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.repository.TokenRepository;
 import vn.thanhtuanle.security.LoginRateLimiter;
+import vn.thanhtuanle.oj.common.web.error.ResourceNotFoundException;
 import vn.thanhtuanle.user.dto.CreateUserRequest;
+import vn.thanhtuanle.user.dto.PublicProfileResponse;
 import vn.thanhtuanle.user.dto.UpdateUserRequest;
 import vn.thanhtuanle.user.dto.UserResponse;
 import vn.thanhtuanle.user.mapper.UserMapper;
@@ -78,6 +80,24 @@ public class UserService {
         return userRepository.findById(id)
                 .map(userMapper::toResponse)
                 .orElseThrow(() -> new AppException(ErrorCode.USER_NOT_FOUND));
+    }
+
+    /** Anyone's view of a live account (disabled included) by username in any case; deleted or unknown is 404. */
+    @Transactional(readOnly = true)
+    public PublicProfileResponse publicProfile(String username) {
+        return userRepository.findLiveByUsernameIgnoreCase(username)
+                .map(UserService::toPublicProfile)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found"));
+    }
+
+    /** Public views of the live accounts among these ids; unknown and deleted ones are left out. */
+    @Transactional(readOnly = true)
+    public List<PublicProfileResponse> publicProfiles(List<UUID> ids) {
+        return userRepository.findLiveByIdIn(ids).stream().map(UserService::toPublicProfile).toList();
+    }
+
+    private static PublicProfileResponse toPublicProfile(User u) {
+        return new PublicProfileResponse(u.getId(), u.getUsername(), u.getName(), u.getAvatar(), u.getCreatedAt());
     }
 
     // ----- create -----

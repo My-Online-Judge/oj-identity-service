@@ -31,6 +31,8 @@ public class SecurityConfig {
     private final OjAccessDeniedHandler accessDeniedHandler;
     private static final String[] WHITE_LIST = {
             "/api/v1/auth/**",
+            "/api/v1/users/public",
+            "/api/v1/users/public/**",
             "/swagger-ui/**",
             "/v3/api-docs/**",
             // Observability endpoints for Prometheus scrape + ops (T5-11). Metric/health data
