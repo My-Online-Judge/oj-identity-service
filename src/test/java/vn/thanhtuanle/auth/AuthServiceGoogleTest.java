@@ -389,11 +389,48 @@ class AuthServiceGoogleTest {
         assertThat(locked.getGoogleId()).isNull();
     }
 
-    /** Only a soft-deleted account has the email: blocked as before, and no new account takes its place. */
+    /**
+     * Google identity is its sub (OIDC Core 5.7): a linked user whose Google email changed signs in to the same
+     * account, keeps its email, and gets no second account. Google's say on the new address does not matter here.
+     */
+    @Test
+    void aLinkedUserWhoseGoogleEmailChanged_signsInToTheSameAccount_andNoAccountIsCreated() {
+        googleAnswers(idToken(true, EMAIL, null));
+        User u = account(SUB, "alice.old@example.org");
+        when(userRepository.findLiveByGoogleId(SUB)).thenReturn(Optional.of(u));
+        when(userRepository.lockById(u.getId())).thenReturn(Optional.of(u));
+        mints(u);
+
+        AuthResponse res = authService.authenticateGoogleUser(CODE, VERIFIER, NONCE, META);
+
+        assertThat(res.getAccessToken()).isEqualTo("AT");
+        assertThat(u.getEmail()).isEqualTo("alice.old@example.org");
+        assertThat(u.getGoogleId()).isEqualTo(SUB);
+        verify(userRepository).save(u);
+        verify(userRepository, never()).findLiveByEmail(any());
+        verifyNoInteractions(roleRepository);
+        verify(loginAttemptService).record(EMAIL, META, true, null);
+    }
+
+    /** Found by its Google id, then unlinked before the lock: the locked row is no longer that Google account's. */
+    @Test
+    void anAccountUnlinkedBeforeTheLock_isNotSignedIn() {
+        googleAnswers(idToken(true));
+        User found = account(SUB);
+        User locked = account(null);
+        locked.setId(found.getId());
+        when(userRepository.findLiveByGoogleId(SUB)).thenReturn(Optional.of(found));
+        when(userRepository.lockById(found.getId())).thenReturn(Optional.of(locked));
+
+        assertRefusedAndAudited(ErrorCode.USER_NOT_EXISTED, EMAIL);
+        assertThat(locked.getGoogleId()).isNull();
+    }
+
+    /** Only a soft-deleted account has the email or the Google id: blocked as before, and nothing is created. */
     @Test
     void aMatchOnlyOnADeletedAccount_isBlocked_andCreatesNothing() {
         googleAnswers(idToken(true));
-        when(userRepository.existsByEmailIgnoreCase(EMAIL)).thenReturn(true);
+        when(userRepository.existsByGoogleIdOrEmailIgnoreCase(SUB, EMAIL)).thenReturn(true);
 
         assertLoginFailsWith(ErrorCode.USER_BLOCKED);
         verify(userRepository, never()).save(any());
@@ -450,6 +487,7 @@ class AuthServiceGoogleTest {
         // before it). The call to Google holds no transaction.
         InOrder order = inOrder(restTemplate, userRepository, transactionManager, tokenRepository);
         order.verify(restTemplate).postForEntity(eq(TOKEN_URI), any(HttpEntity.class), eq(ExchangeTokenResponse.class));
+        order.verify(userRepository).findLiveByGoogleId(SUB);
         order.verify(userRepository).findLiveByEmail(EMAIL);
         order.verify(transactionManager).getTransaction(any());
         order.verify(userRepository).lockById(u.getId());

@@ -171,4 +171,49 @@ class GoogleLoginIntegrationTest {
                 .isEqualTo(APP + "/problems?login=failed&reason=USER_BLOCKED");
         assertThat(accountsWithEmail(email)).hasSize(1);
     }
+
+    /** A Google account that signed up, whose Google email later changed. */
+    private User googleAccount(String sub, String email, UserStatus status) {
+        return userRepository.save(User.builder().username(email).name("G").email(email).googleId(sub)
+                .status(status.getValue()).roles(new HashSet<>()).build());
+    }
+
+    @Test
+    void aLinkedUserWhoseGoogleEmailChangedSignsInToTheSameAccount_andNoRowIsCreated() throws Exception {
+        String sub = "sub-" + UUID.randomUUID();
+        String oldEmail = uniqueEmail("gmail.com");
+        String newEmail = uniqueEmail("gmail.com");
+        User account = googleAccount(sub, oldEmail, UserStatus.ACTIVE);
+        long accounts = userRepository.count();
+        googleSignsIn(identity(sub, newEmail));
+
+        assertSignedIn(callback());
+        assertThat(userRepository.count()).isEqualTo(accounts);
+        assertThat(accountsWithEmail(newEmail)).isEmpty();
+        assertThat(userRepository.findById(account.getId()).orElseThrow().getEmail()).isEqualTo(oldEmail);
+    }
+
+    /** V6 lets a soft-deleted account keep the Google id of a live one: the live one signs in. */
+    @Test
+    void aLiveAndADeletedAccountWithTheGoogleId_signInToTheLiveOne() throws Exception {
+        String sub = "sub-" + UUID.randomUUID();
+        googleAccount(sub, uniqueEmail("gmail.com"), UserStatus.DELETED);
+        User live = googleAccount(sub, uniqueEmail("gmail.com"), UserStatus.ACTIVE);
+        googleSignsIn(identity(sub, uniqueEmail("gmail.com")));
+
+        assertSignedIn(callback());
+        assertThat(userRepository.findById(live.getId()).orElseThrow().getLastLogin()).isNotNull();
+    }
+
+    @Test
+    void aGoogleIdThatOnlyADeletedAccountHas_isBlocked_andCreatesNothing() throws Exception {
+        String sub = "sub-" + UUID.randomUUID();
+        googleAccount(sub, uniqueEmail("gmail.com"), UserStatus.DELETED);
+        long accounts = userRepository.count();
+        googleSignsIn(identity(sub, uniqueEmail("gmail.com")));
+
+        assertThat(callback().getResponse().getRedirectedUrl())
+                .isEqualTo(APP + "/problems?login=failed&reason=USER_BLOCKED");
+        assertThat(userRepository.count()).isEqualTo(accounts);
+    }
 }

@@ -51,7 +51,6 @@ class GoogleLoginTransactionBoundaryTest {
 
     private static final ClientMeta META = new ClientMeta("10.0.0.7", "dev-7", "browser/7.0");
     private static final String NONCE = "boundary-nonce";
-    private static final String SUB = "google-sub-boundary";
 
     @Autowired AuthService authService;
     @Autowired UserRepository userRepository;
@@ -90,7 +89,8 @@ class GoogleLoginTransactionBoundaryTest {
         String idToken = new PlainJWT(new JWTClaimsSet.Builder()
                 .issuer("https://accounts.google.com")
                 .audience(googleClientId)
-                .subject(SUB)
+                // A Google account of its own per sign-in: an account linked by an earlier test is not found by it.
+                .subject("google-sub-" + UUID.randomUUID())
                 .expirationTime(Date.from(Instant.now().plusSeconds(3600)))
                 .claim("nonce", NONCE)
                 .claim("email", email)

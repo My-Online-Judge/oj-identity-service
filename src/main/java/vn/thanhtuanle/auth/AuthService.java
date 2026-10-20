@@ -167,10 +167,13 @@ public class AuthService {
 
     /**
      * Completes a Google sign-in: exchanges the code (with its PKCE verifier) for Google's id token, which must carry
-     * this attempt's nonce, and signs in the live account with that email (in any case). An unverified email is refused
-     * before any account is looked at. An account already linked to another Google id is refused; one with none is
-     * linked, if Google is authoritative for the address; with no account, one is created. An email that only a
-     * soft-deleted account has is blocked.
+     * this attempt's nonce, and signs in the live account linked to that Google id ({@code sub}), whatever its email is
+     * now. Failing that, the live account with the email (in any case): one already linked to another Google id is
+     * refused; one with none is linked, if Google is authoritative for the address; with no account, one is created. A
+     * Google id or email that only a soft-deleted account has is blocked.
+     *
+     * <p>An unverified email is refused first, before any account is looked at, even one the {@code sub} would find:
+     * the spec orders that rule first, and the strict order is the simpler one.
      *
      * <p>Not {@code @Transactional}: the call to Google holds neither a transaction nor a pooled connection. The account
      * and token writes run in one short transaction, under the user's row lock, like every other token change. The
@@ -187,8 +190,8 @@ public class AuthService {
 
         AuthResponse tokens;
         try {
-            Optional<UUID> accountId = googleAccount(google);
-            tokens = transactionTemplate.execute(status -> startGoogleSession(accountId, google, meta));
+            GoogleMatch match = googleAccount(google);
+            tokens = transactionTemplate.execute(status -> startGoogleSession(match, google, meta));
         } catch (AppException e) {
             // The transaction has rolled back and released the row lock: the audit (REQUIRES_NEW) waits for a pooled
             // connection of its own, and must not keep the user locked while it does.
@@ -200,17 +203,30 @@ public class AuthService {
         return tokens;
     }
 
+    /** The account a Google identity signs in to: found by its Google id, by its email, or none (a new account). */
+    private record GoogleMatch(UUID userId, boolean bySub) {
+        static final GoogleMatch NONE = new GoogleMatch(null, false);
+    }
+
     /**
-     * The live account with the Google email, in any case (read outside the transaction; only its id is kept), or none
-     * for a new account. A soft-deleted account with that email blocks the sign-in, as it did before soft-deleted rows
-     * stopped counting towards the email's uniqueness: its owner does not get a fresh account by signing in again.
+     * Finds the account, outside the transaction (only its id is kept): the live account linked to the Google id
+     * ({@code sub}, Google's stable identifier; OIDC Core 5.7), else the live account with the Google email in any case.
+     * A soft-deleted account with that Google id or email blocks the sign-in, as it did before soft-deleted rows stopped
+     * counting towards uniqueness: its owner does not get a fresh account by signing in again.
      */
-    private Optional<UUID> googleAccount(GoogleIdentity google) {
-        Optional<UUID> live = userRepository.findLiveByEmail(google.email()).map(User::getId);
-        if (live.isEmpty() && userRepository.existsByEmailIgnoreCase(google.email())) {
+    private GoogleMatch googleAccount(GoogleIdentity google) {
+        Optional<UUID> bySub = userRepository.findLiveByGoogleId(google.sub()).map(User::getId);
+        if (bySub.isPresent()) {
+            return new GoogleMatch(bySub.get(), true);
+        }
+        Optional<UUID> byEmail = userRepository.findLiveByEmail(google.email()).map(User::getId);
+        if (byEmail.isPresent()) {
+            return new GoogleMatch(byEmail.get(), false);
+        }
+        if (userRepository.existsByGoogleIdOrEmailIgnoreCase(google.sub(), google.email())) {
             throw new AppException(ErrorCode.USER_BLOCKED);
         }
-        return live;
+        return GoogleMatch.NONE;
     }
 
     /** The token request: the authorization code plus the PKCE verifier. Returns Google's id token. */
@@ -261,8 +277,10 @@ public class AuthService {
      * existing account is read again under its row lock, so the link decision and the writes see its current row, not
      * the copy read before the transaction.
      */
-    private AuthResponse startGoogleSession(Optional<UUID> accountId, GoogleIdentity google, ClientMeta meta) {
-        User user = accountId.isPresent() ? lockedAccount(accountId.get(), google) : newAccount(google);
+    private AuthResponse startGoogleSession(GoogleMatch match, GoogleIdentity google, ClientMeta meta) {
+        User user = match.userId() == null ? newAccount(google)
+                : match.bySub() ? accountLinkedTo(match.userId(), google)
+                : accountWithEmail(match.userId(), google);
 
         // Only active accounts may log in (disabled/soft-deleted users are blocked).
         // Audited like the password flow (by the caller); NOT rate-limited — the OAuth code exchange is its own guard.
@@ -289,11 +307,26 @@ public class AuthService {
     }
 
     /**
+     * The account linked to the Google id, locked. Its email stays as it is, even when Google's has changed: the
+     * account's own email may differ, and changing it could collide with another account's. The row as locked must
+     * still be linked to that Google id: one unlinked since it was found is not that Google account's.
+     */
+    private User accountLinkedTo(UUID id, GoogleIdentity google) {
+        User user = userRepository.lockById(id).orElseThrow(() -> new AppException(ErrorCode.USER_NOT_EXISTED));
+        if (!google.sub().equals(user.getGoogleId())) {
+            log.warn("Google login refused: user {} changed its Google link while the login was finding it",
+                    user.getId());
+            throw new AppException(ErrorCode.USER_NOT_EXISTED);
+        }
+        return user;
+    }
+
+    /**
      * The account with the Google email, locked. Linked to another Google id: refused. Linked to none: linked now, if
      * Google is authoritative for the address. The row as locked must still have that email: one changed since it was
      * found is not the account the email named.
      */
-    private User lockedAccount(UUID id, GoogleIdentity google) {
+    private User accountWithEmail(UUID id, GoogleIdentity google) {
         User user = userRepository.lockById(id).orElseThrow(() -> new AppException(ErrorCode.USER_NOT_EXISTED));
         if (!google.email().equalsIgnoreCase(user.getEmail())) {
             log.warn("Google login refused: user {} changed its email while the login was finding it", user.getId());

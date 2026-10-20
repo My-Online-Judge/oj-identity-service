@@ -20,8 +20,6 @@ public interface UserRepository extends JpaRepository<User, UUID>, JpaSpecificat
 
     boolean existsByEmailAndIdNot(String email, UUID id);
 
-    Optional<User> findByEmail(String email);
-
     /**
      * The live account (status not 2, soft-deleted) with this email, whatever its case: the rows identity's V6 unique
      * index {@code ux_users_email_lower} covers, so there is at most one.
@@ -29,8 +27,15 @@ public interface UserRepository extends JpaRepository<User, UUID>, JpaSpecificat
     @Query("select u from User u where lower(u.email) = lower(:email) and u.status <> 2")
     Optional<User> findLiveByEmail(@Param("email") String email);
 
-    /** Any account, live or not, with this email in any case. */
-    boolean existsByEmailIgnoreCase(String email);
+    /**
+     * The live account (status not 2) linked to this Google id ({@code sub}): the rows V6's unique index
+     * {@code ux_users_google_id} covers, so there is at most one.
+     */
+    @Query("select u from User u where u.googleId = :googleId and u.status <> 2")
+    Optional<User> findLiveByGoogleId(@Param("googleId") String googleId);
+
+    /** Any account, live or not, with this Google id or with this email in any case. */
+    boolean existsByGoogleIdOrEmailIgnoreCase(String googleId, String email);
 
     long countByRoles_Id(UUID roleId);
 
