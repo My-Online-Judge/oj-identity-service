@@ -134,8 +134,7 @@ class AuthServiceGoogleTest {
 
     private void googleAnswers(String idToken) {
         when(restTemplate.postForEntity(eq(TOKEN_URI), any(HttpEntity.class), eq(ExchangeTokenResponse.class)))
-                .thenReturn(ResponseEntity.ok(ExchangeTokenResponse.builder()
-                        .accessToken("google-access").idToken(idToken).build()));
+                .thenReturn(ResponseEntity.ok(new ExchangeTokenResponse("google-access", null, null, null, null, idToken)));
     }
 
     private User account(String googleId) {
@@ -247,10 +246,12 @@ class AuthServiceGoogleTest {
 
     @Test
     void theTokenResponsePrintsNoToken() {
-        String printed = ExchangeTokenResponse.builder().accessToken("access-secret").refreshToken("refresh-secret")
-                .idToken("id-secret").scope("openid email").tokenType("Bearer").build().toString();
+        String printed = new ExchangeTokenResponse("access-secret", 3599L, "refresh-secret", "openid email", "Bearer",
+                "id-secret").toString();
 
         assertThat(printed).doesNotContain("access-secret", "refresh-secret", "id-secret").contains("openid email");
+        // No Lombok builder either: its toString ignores @ToString.Exclude and would print all three.
+        assertThat(ExchangeTokenResponse.class.getDeclaredClasses()).isEmpty();
     }
 
     /** The id token's signature is not checked: only TLS to Google's token endpoint proves who issued it. */

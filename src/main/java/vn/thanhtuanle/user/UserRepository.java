@@ -49,8 +49,13 @@ public interface UserRepository extends JpaRepository<User, UUID>, JpaSpecificat
     @Query("select u from User u where u.googleId = :googleId and u.status <> 2")
     Optional<User> findLiveByGoogleId(@Param("googleId") String googleId);
 
-    /** Any account, live or not, with this Google id or with this email in any case. */
-    boolean existsByGoogleIdOrEmailIgnoreCase(String googleId, String email);
+    /**
+     * Any account, live or not, with this Google id or with this email in any case. Case is folded with {@code lower()},
+     * like the live lookup and V6's index (a derived {@code IgnoreCase} uses {@code upper()}, which differs for a few
+     * letters such as ß/ẞ).
+     */
+    @Query("select count(u) > 0 from User u where u.googleId = :googleId or lower(u.email) = lower(:email)")
+    boolean existsByGoogleIdOrEmailIgnoreCase(@Param("googleId") String googleId, @Param("email") String email);
 
     long countByRoles_Id(UUID roleId);
 

@@ -98,7 +98,7 @@ class GoogleLoginTransactionBoundaryTest {
                 // A Workspace account: Google is authoritative for its address, so an existing account may be linked.
                 .claim("hd", "example.com")
                 .build()).serialize();
-        return ResponseEntity.ok(ExchangeTokenResponse.builder().idToken(idToken).build());
+        return ResponseEntity.ok(new ExchangeTokenResponse(null, null, null, null, null, idToken));
     }
 
     private AtomicReference<DbState> recordStateWhileAuditing() {

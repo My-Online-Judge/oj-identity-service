@@ -79,7 +79,7 @@ class GoogleLoginIntegrationTest {
                 .claim("email_verified", true)
                 .build()).serialize();
         when(restTemplate.postForEntity(anyString(), any(HttpEntity.class), eq(ExchangeTokenResponse.class)))
-                .thenReturn(ResponseEntity.ok(ExchangeTokenResponse.builder().idToken(idToken).build()));
+                .thenReturn(ResponseEntity.ok(new ExchangeTokenResponse(null, null, null, null, null, idToken)));
     }
 
     private static JWTClaimsSet.Builder identity(String sub, String email) {
@@ -170,6 +170,19 @@ class GoogleLoginIntegrationTest {
         assertThat(callback().getResponse().getRedirectedUrl())
                 .isEqualTo(APP + "/problems?login=failed&reason=USER_BLOCKED");
         assertThat(accountsWithEmail(email)).hasSize(1);
+    }
+
+    @Test
+    void aDeletedAccountWhoseEmailDiffersOnlyInCase_blocksToo_byTheIndexsRuleOfCase() throws Exception {
+        // lower('ẞ') is 'ß', as in V6's index and the live lookup; upper('ß') is 'SS', and upper('ẞ') stays 'ẞ'.
+        String local = "stra" + UUID.randomUUID().toString().substring(0, 6);
+        account(local + "ße@gmail.com", UserStatus.DELETED);
+        String googleEmail = local + "ẞe@gmail.com";
+        googleSignsIn(identity("sub-" + UUID.randomUUID(), googleEmail));
+
+        assertThat(callback().getResponse().getRedirectedUrl())
+                .isEqualTo(APP + "/problems?login=failed&reason=USER_BLOCKED");
+        assertThat(userRepository.findAll()).noneMatch(u -> googleEmail.equals(u.getEmail()));
     }
 
     /** A Google account that signed up, whose Google email later changed. */

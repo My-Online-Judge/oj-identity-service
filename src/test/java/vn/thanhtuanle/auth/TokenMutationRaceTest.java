@@ -281,8 +281,8 @@ class TokenMutationRaceTest {
         Session session = login();
         String email = jdbc.queryForObject("select email from t_users where id = ?", String.class, session.userId());
         when(restTemplate.postForEntity(anyString(), any(HttpEntity.class), eq(ExchangeTokenResponse.class)))
-                .thenReturn(ResponseEntity.ok(ExchangeTokenResponse.builder()
-                        .idToken(googleIdToken(email, "race-nonce")).build()));
+                .thenReturn(ResponseEntity.ok(new ExchangeTokenResponse(null, null, null, null, null,
+                        googleIdToken(email, "race-nonce"))));
         CountDownLatch rotated = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         // Pause the refresh right after it marked the presented token rotated, before it writes the successor.
@@ -316,7 +316,7 @@ class TokenMutationRaceTest {
         // One Google account (one sub), signing in for the first time from two tabs at once.
         String idToken = googleIdToken(email, "race-nonce");
         when(restTemplate.postForEntity(anyString(), any(HttpEntity.class), eq(ExchangeTokenResponse.class)))
-                .thenReturn(ResponseEntity.ok(ExchangeTokenResponse.builder().idToken(idToken).build()));
+                .thenReturn(ResponseEntity.ok(new ExchangeTokenResponse(null, null, null, null, null, idToken)));
         CountDownLatch inserted = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         // Pause the first sign-in after it inserted the new account, before it commits.

@@ -204,7 +204,7 @@ class UserUniquenessOnPostgresTest {
                 .claim("nonce", "n-1").claim("email", taken.toUpperCase()).claim("email_verified", true)
                 .claim("hd", "corp.example").build()).serialize();
         when(restTemplate.postForEntity(anyString(), any(HttpEntity.class), eq(ExchangeTokenResponse.class)))
-                .thenReturn(ResponseEntity.ok(ExchangeTokenResponse.builder().idToken(idToken).build()));
+                .thenReturn(ResponseEntity.ok(new ExchangeTokenResponse(null, null, null, null, null, idToken)));
 
         assertThatThrownBy(() -> authService.authenticateGoogleUser("code", "verifier", "n-1",
                 new ClientMeta("10.0.0.8", "dev-8", "pg/1.0")))
@@ -220,7 +220,7 @@ class UserUniquenessOnPostgresTest {
                 .expirationTime(Date.from(Instant.now().plusSeconds(3600)))
                 .claim("nonce", "n-1").claim("email", email).claim("email_verified", true).build()).serialize();
         when(restTemplate.postForEntity(anyString(), any(HttpEntity.class), eq(ExchangeTokenResponse.class)))
-                .thenReturn(ResponseEntity.ok(ExchangeTokenResponse.builder().idToken(idToken).build()));
+                .thenReturn(ResponseEntity.ok(new ExchangeTokenResponse(null, null, null, null, null, idToken)));
     }
 
     /**
