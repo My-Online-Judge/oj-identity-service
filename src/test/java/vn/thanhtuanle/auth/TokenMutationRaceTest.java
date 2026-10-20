@@ -27,7 +27,12 @@ import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.common.util.JwtUtil;
 import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.security.LoginRateLimiter;
+import vn.thanhtuanle.common.exception.ErrorCode;
+import vn.thanhtuanle.oj.common.web.error.AppException;
 import vn.thanhtuanle.user.UserRepository;
+import vn.thanhtuanle.user.UserService;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -45,6 +50,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -80,7 +86,9 @@ class TokenMutationRaceTest {
 
     @Autowired AuthService authService;
     @Autowired UserRepository userRepository;
-    @Autowired PasswordEncoder passwordEncoder;
+    @Autowired UserService userService;
+
+    @MockitoSpyBean PasswordEncoder passwordEncoder;
     @Autowired JdbcTemplate jdbc;
 
     @MockitoSpyBean JwtUtil jwtUtil;
@@ -106,8 +114,14 @@ class TokenMutationRaceTest {
     }
 
     private Session login() {
+        User user = seedUser();
+        AuthResponse tokens = authService.authenticateWithPassword(user.getUsername(), PASSWORD, META);
+        return new Session(user.getId(), tokens.getRefreshToken());
+    }
+
+    private User seedUser() {
         String username = "race_" + UUID.randomUUID().toString().substring(0, 8);
-        User user = userRepository.save(User.builder()
+        return userRepository.save(User.builder()
                 .username(username)
                 .name(username)
                 .email(username + "@example.com")
@@ -115,8 +129,68 @@ class TokenMutationRaceTest {
                 .status(CommonStatus.ACTIVE.getValue())
                 .roles(new HashSet<>())
                 .build());
-        AuthResponse tokens = authService.authenticateWithPassword(username, PASSWORD, META);
-        return new Session(user.getId(), tokens.getRefreshToken());
+    }
+
+    /** Starts a login with the right password and pauses it right after BCrypt said so. */
+    private Future<AuthResponse> loginPausedAfterThePasswordCheck(User user, CountDownLatch checked,
+                                                                 CountDownLatch release) throws Exception {
+        doAnswer(invocation -> {
+            Object matched = invocation.callRealMethod();
+            if (Thread.currentThread().getName().equals("race-first")) {
+                checked.countDown();
+                release.await(20, TimeUnit.SECONDS);
+            }
+            return matched;
+        }).when(passwordEncoder).matches(any(), any());
+        Future<AuthResponse> login = first.submit(
+                () -> authService.authenticateWithPassword(user.getUsername(), PASSWORD, META));
+        assertThat(checked.await(10, TimeUnit.SECONDS)).isTrue();
+        return login;
+    }
+
+    private void assertTheLoginFailed(Future<AuthResponse> login) {
+        // Answered like any wrong password, and nothing written.
+        assertThatThrownBy(() -> login.get(20, TimeUnit.SECONDS))
+                .hasCauseInstanceOf(AppException.class)
+                .satisfies(e -> assertThat(((AppException) e.getCause()).getErrorCode())
+                        .isEqualTo(ErrorCode.USER_NOT_EXISTED));
+    }
+
+    @Test
+    void aLoginRacingAPasswordChangeMintsNothing() throws Exception {
+        User user = seedUser();
+        CountDownLatch checked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Future<AuthResponse> login = loginPausedAfterThePasswordCheck(user, checked, release);
+
+        second.submit(() -> {
+            SecurityContextHolder.getContext().setAuthentication(
+                    new UsernamePasswordAuthenticationToken(user.getUsername(), null, List.of()));
+            try {
+                userService.changeOwnPassword(PASSWORD, "Changed123");
+            } finally {
+                SecurityContextHolder.clearContext();
+            }
+            return null;
+        }).get(20, TimeUnit.SECONDS);
+        release.countDown();
+
+        assertTheLoginFailed(login);
+        assertThat(rowsOf(user.getId())).isEmpty();
+    }
+
+    @Test
+    void aLoginRacingAPasswordResetMintsNothing() throws Exception {
+        User user = seedUser();
+        CountDownLatch checked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Future<AuthResponse> login = loginPausedAfterThePasswordCheck(user, checked, release);
+
+        second.submit(() -> userService.resetPassword(user.getId(), "Reset1234")).get(20, TimeUnit.SECONDS);
+        release.countDown();
+
+        assertTheLoginFailed(login);
+        assertThat(rowsOf(user.getId())).isEmpty();
     }
 
     private Connection connect() throws Exception {

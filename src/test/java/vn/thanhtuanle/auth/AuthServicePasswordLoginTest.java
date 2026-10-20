@@ -265,6 +265,42 @@ class AuthServicePasswordLoginTest {
     }
 
     @Test
+    void aPasswordChangedSinceTheCheck_failsTheLogin_andWritesNothing() {
+        User checked = admin(CommonStatus.ACTIVE.getValue(), HASH);
+        User locked = admin(CommonStatus.ACTIVE.getValue(), "$2a$10$changed");
+        locked.setId(checked.getId());
+        when(userRepository.findByUsername("admin")).thenReturn(Optional.of(checked));
+        when(passwordEncoder.matches("secret", HASH)).thenReturn(true);
+        when(userRepository.lockById(checked.getId())).thenReturn(Optional.of(locked));
+
+        // The password BCrypt matched is no longer the account's: a change or reset committed in between.
+        assertThatThrownBy(() -> authService.authenticateWithPassword("admin", "secret", META))
+                .isInstanceOfSatisfying(AppException.class,
+                        e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USER_NOT_EXISTED));
+        verify(tokenRepository, never()).save(any());
+        verify(tokenRepository, never()).deleteAllByUserId(any());
+        verify(transactionManager).rollback(any());
+        verify(loginRateLimiter).recordFailure(ATTEMPT);
+        verify(loginRateLimiter, never()).recordSuccess(any());
+    }
+
+    @Test
+    void anAccountDisabledSinceTheCheck_failsTheLogin_andWritesNothing() {
+        User checked = admin(CommonStatus.ACTIVE.getValue(), HASH);
+        User locked = admin(0, HASH);
+        locked.setId(checked.getId());
+        when(userRepository.findByUsername("admin")).thenReturn(Optional.of(checked));
+        when(passwordEncoder.matches("secret", HASH)).thenReturn(true);
+        when(userRepository.lockById(checked.getId())).thenReturn(Optional.of(locked));
+
+        assertThatThrownBy(() -> authService.authenticateWithPassword("admin", "secret", META))
+                .isInstanceOfSatisfying(AppException.class,
+                        e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USER_NOT_EXISTED));
+        verify(tokenRepository, never()).save(any());
+        verify(jwtUtil, never()).generateToken(any());
+    }
+
+    @Test
     void blockedUser_isRejected() {
         User u = admin(0, HASH); // not ACTIVE
         when(userRepository.findByUsername("admin")).thenReturn(Optional.of(u));

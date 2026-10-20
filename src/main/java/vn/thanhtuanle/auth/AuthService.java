@@ -49,6 +49,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.Semaphore;
@@ -288,23 +289,23 @@ public class AuthService {
     public AuthResponse authenticateWithPassword(String username, String password, ClientMeta meta) {
         LoginRateLimiter.Attempt attempt = loginRateLimiter.reserve(username, meta);
 
-        User user;
+        AuthResponse tokens;
         try {
-            user = userRepository.findByUsername(username)
+            User user = userRepository.findByUsername(username)
                     .filter(u -> u.getPassword() != null && passwordEncoder.matches(password, u.getPassword()))
                     .orElseThrow(() -> new AppException(ErrorCode.USER_NOT_EXISTED));
 
             if (user.getStatus() == null || user.getStatus() != CommonStatus.ACTIVE.getValue()) {
                 throw new AppException(ErrorCode.USER_BLOCKED);
             }
+            String verifiedHash = user.getPassword();
+            tokens = transactionTemplate.execute(status -> startPasswordSession(user.getId(), verifiedHash, meta));
         } catch (AppException e) {
             Duration backoff = loginRateLimiter.recordFailure(attempt);
             loginAttemptService.record(username, meta, false, e.getErrorCode().name());
             backOff(backoff);
             throw e;
         }
-
-        AuthResponse tokens = transactionTemplate.execute(status -> startPasswordSession(user.getId(), meta));
 
         loginRateLimiter.recordSuccess(attempt);
         loginAttemptService.record(username, meta, true, null);
@@ -332,9 +333,17 @@ public class AuthService {
     /**
      * A successful password login's writes: this login's tokens replace every earlier one. They go to the user's row as
      * locked now, not to the copy read before the password check, so a concurrent change to the user is not undone.
+     *
+     * <p>The check is repeated under the lock: if the row no longer holds the hash BCrypt matched ({@code verifiedHash}),
+     * or is no longer active, a password change, reset or disable committed meanwhile and ended every session. Nothing
+     * is written (the transaction rolls back) and the login fails like a wrong password, so it reveals nothing new.
      */
-    private AuthResponse startPasswordSession(UUID userId, ClientMeta meta) {
+    private AuthResponse startPasswordSession(UUID userId, String verifiedHash, ClientMeta meta) {
         User user = userRepository.lockById(userId).orElseThrow(() -> new AppException(ErrorCode.USER_NOT_EXISTED));
+        if (!Objects.equals(user.getPassword(), verifiedHash)
+                || !Objects.equals(user.getStatus(), CommonStatus.ACTIVE.getValue())) {
+            throw new AppException(ErrorCode.USER_NOT_EXISTED);
+        }
         String accessToken = jwtUtil.generateToken(user);
         String refreshToken = jwtUtil.generateRefreshToken(user);
 
