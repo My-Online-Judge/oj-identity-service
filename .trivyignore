@@ -1,0 +1,4 @@
+# Spring Framework 6.2.19 is the last 6.2.x release; Trivy lists the fix only in 7.0.9 (Spring Boot 4).
+# Staying on Boot 3.5 is a platform decision, so CI accepts these until the Boot 4 migration. Review then.
+CVE-2026-47884
+CVE-2026-47890
