@@ -62,7 +62,8 @@ class SessionRevokerRedisTimeoutTest {
                 .withPropertyValues("spring.data.redis.host=127.0.0.1",
                         "spring.data.redis.port=" + silentRedis.getLocalPort())
                 .run(context -> {
-                    SessionRevoker revoker = new SessionRevoker(context.getBean(StringRedisTemplate.class), 900_000L);
+                    SessionRevoker revoker = new SessionRevoker(context.getBean(StringRedisTemplate.class), 900_000L,
+                            Duration.ofHours(25));
                     long start = System.nanoTime();
 
                     // Outside a transaction the write happens right away; it fails and is only logged.

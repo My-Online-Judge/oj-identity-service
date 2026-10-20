@@ -23,6 +23,11 @@ import java.util.UUID;
  * <p>Access tokens carry authorities and account status no longer lives in a per-request lookup,
  * so this is what makes disabling a user or changing their permissions take effect at once: the
  * portal gets a 401, refreshes, and receives a token minted from the new state.
+ *
+ * <p>A marker lives {@code oj.session.revocation-marker-ttl} (25 h by default), never less than the access-token TTL
+ * plus the verifiers' clock skew. The default outlives the 1-day access tokens minted before sub-project 12, so on
+ * deploy day a disable, delete, password change or reset, role change, reuse or logout also strips those; without it
+ * they would be accepted again once a 16-minute marker expired. The cost is one small key per revoked user for 25 h.
  */
 @Component
 @Slf4j
@@ -35,9 +40,13 @@ public class SessionRevoker {
     private final Duration markerTtl;
 
     public SessionRevoker(StringRedisTemplate redis,
-                          @Value("${application.security.jwt.expiration}") long accessTokenTtlMillis) {
+                          @Value("${application.security.jwt.expiration}") long accessTokenTtlMillis,
+                          @Value("${oj.session.revocation-marker-ttl:25h}") Duration configuredMarkerTtl) {
         this.redis = redis;
-        this.markerTtl = Duration.ofMillis(accessTokenTtlMillis).plus(CLOCK_SKEW);
+        // Never shorter than a token it covers can still be accepted, whatever is configured.
+        Duration coversEveryCurrentToken = Duration.ofMillis(accessTokenTtlMillis).plus(CLOCK_SKEW);
+        this.markerTtl = configuredMarkerTtl.compareTo(coversEveryCurrentToken) > 0
+                ? configuredMarkerTtl : coversEveryCurrentToken;
     }
 
     /**
