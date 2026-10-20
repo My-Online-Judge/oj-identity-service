@@ -12,7 +12,13 @@ import java.util.UUID;
 
 /** {@code lockById}, the user's row lock, comes from the {@link UserRowLock} fragment. */
 public interface UserRepository extends JpaRepository<User, UUID>, JpaSpecificationExecutor<User>, UserRowLock {
-    Optional<User> findByUsername(String username);
+    /**
+     * The live account (status not 2, soft-deleted) with exactly this username: what login, {@code /auth/me}, logout
+     * and the current user resolve. V6's unique index {@code ux_users_username_lower} counts live rows only, so a
+     * soft-deleted account may keep the username of a live one; among live rows there is at most one.
+     */
+    @Query("select u from User u where u.username = :username and u.status <> 2")
+    Optional<User> findByUsername(@Param("username") String username);
 
     Boolean existsByUsername(String username);
 

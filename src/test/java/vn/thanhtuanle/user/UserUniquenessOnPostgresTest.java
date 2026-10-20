@@ -11,6 +11,8 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -34,6 +36,7 @@ import vn.thanhtuanle.oj.common.web.error.AppException;
 import java.time.Instant;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -165,6 +168,46 @@ class UserUniquenessOnPostgresTest {
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USERNAME_EXISTED));
         assertThat(userRepository.count()).isEqualTo(accounts);
+    }
+
+    /** Google's token endpoint answers with a verified id token for this Google account. */
+    private void googleAnswersFor(String sub, String email) {
+        String idToken = new PlainJWT(new JWTClaimsSet.Builder()
+                .issuer("https://accounts.google.com").audience(googleClientId).subject(sub)
+                .expirationTime(Date.from(Instant.now().plusSeconds(3600)))
+                .claim("nonce", "n-1").claim("email", email).claim("email_verified", true).build()).serialize();
+        when(restTemplate.postForEntity(anyString(), any(HttpEntity.class), eq(ExchangeTokenResponse.class)))
+                .thenReturn(ResponseEntity.ok(ExchangeTokenResponse.builder().idToken(idToken).build()));
+    }
+
+    /**
+     * V6 counts live accounts only, so a soft-deleted account may keep the exact username of a live one. Here a Google
+     * account signed up as {@code kate@uni.edu.vn}, had its email changed, and was soft-deleted; another Google account
+     * with that address signs up and gets the same username. A lookup by username sees only the live account, so the
+     * new account's own requests (and its next sign-in) work.
+     */
+    @Test
+    void aGoogleAccountWithTheUsernameOfADeletedAccount_isTheOneItsUsernameFinds() {
+        String address = unique("kate") + "@uni.edu.vn";
+        userRepository.save(User.builder().username(address).name("Kate").email(unique("kate.new") + "@uni.edu.vn")
+                .googleId(unique("sub")).status(UserStatus.DELETED.getValue()).roles(new HashSet<>()).build());
+        String sub = unique("sub");
+        googleAnswersFor(sub, address);
+        ClientMeta meta = new ClientMeta("10.0.0.9", "dev-9", "pg/1.0");
+
+        assertThat(authService.authenticateGoogleUser("code", "verifier", "n-1", meta).getAccessToken()).isNotNull();
+
+        assertThat(userRepository.findByUsername(address)).get()
+                .extracting(User::getGoogleId, User::getStatus)
+                .containsExactly(sub, UserStatus.ACTIVE.getValue());
+        SecurityContextHolder.getContext().setAuthentication(
+                new UsernamePasswordAuthenticationToken(address, null, List.of()));
+        try {
+            assertThat(authService.me().getUsername()).isEqualTo(address);
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
+        assertThat(authService.authenticateGoogleUser("code", "verifier", "n-1", meta).getAccessToken()).isNotNull();
     }
 
     /**
