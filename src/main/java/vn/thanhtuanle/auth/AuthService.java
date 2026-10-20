@@ -1,5 +1,7 @@
 package vn.thanhtuanle.auth;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -11,6 +13,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
 import jakarta.transaction.Transactional;
@@ -38,6 +41,7 @@ import vn.thanhtuanle.user.UserRepository;
 import vn.thanhtuanle.user.dto.UserResponse;
 import vn.thanhtuanle.user.mapper.UserMapper;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -108,6 +112,19 @@ public class AuthService {
     private String tokenUri;
 
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    /**
+     * Startup check. The id token's signature is not checked ({@link GoogleIdTokenVerifier}): TLS to Google's token
+     * endpoint is what proves who issued it, so a token URI that is not https would accept anyone's token.
+     */
+    @PostConstruct
+    void requireHttpsTokenUri() {
+        if (!"https".equalsIgnoreCase(URI.create(tokenUri).getScheme())) {
+            throw new IllegalStateException(
+                    "spring.security.oauth2.client.provider.google.token-uri (GOOGLE_TOKEN_URI) must be an https URL");
+        }
+    }
 
     /**
      * Starts a Google sign-in: the authorization URL plus a fresh {@code state}, PKCE code verifier and nonce. The
@@ -199,7 +216,13 @@ public class AuthService {
             ResponseEntity<ExchangeTokenResponse> response = restTemplate.postForEntity(tokenUri,
                     new HttpEntity<>(params, headers), ExchangeTokenResponse.class);
             tokenResponse = response.getBody();
+        } catch (HttpClientErrorException e) {
+            // Google refused the code (made up, expired, already used, another verifier): anyone can cause this from
+            // the public callback, so what Google said, without a stack trace.
+            log.warn("Google refused the authorization code: {} {}", e.getStatusCode().value(), googleError(e));
+            throw new AppException(ErrorCode.UNCATEGORIZED_EXCEPTION);
         } catch (Exception e) {
+            // Google could not be reached or answered with a server error, or the call timed out: ours to look at.
             log.error("Failed to exchange token with Google", e);
             throw new AppException(ErrorCode.UNCATEGORIZED_EXCEPTION);
         }
@@ -207,6 +230,15 @@ public class AuthService {
             throw new AppException(ErrorCode.UNCATEGORIZED_EXCEPTION);
         }
         return tokenResponse.getIdToken();
+    }
+
+    /** The {@code error} field of Google's refusal ({@code invalid_grant}, ...), in its loggable form. */
+    private static String googleError(HttpClientErrorException e) {
+        try {
+            return OAuthErrors.loggable(JSON.readTree(e.getResponseBodyAsString()).path("error").asText(""));
+        } catch (Exception notJson) {
+            return "";
+        }
     }
 
     /**

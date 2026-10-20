@@ -50,7 +50,7 @@ public class GoogleIdTokenVerifier {
     public GoogleIdentity verify(String idToken, String expectedNonce) {
         JWTClaimsSet claims = claimsOf(idToken);
         try {
-            if (!ISSUERS.contains(claims.getIssuer())) {
+            if (claims.getIssuer() == null || !ISSUERS.contains(claims.getIssuer())) {
                 throw invalid("issuer");
             }
             List<String> audience = claims.getAudience();

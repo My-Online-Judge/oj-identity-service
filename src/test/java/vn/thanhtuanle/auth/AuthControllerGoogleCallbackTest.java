@@ -9,6 +9,8 @@ import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.util.ReflectionTestUtils;
 import vn.thanhtuanle.auth.dto.AuthResponse;
@@ -17,6 +19,7 @@ import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.oj.common.web.error.AppException;
 
 import java.io.IOException;
+import java.util.Arrays;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -26,7 +29,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-@ExtendWith(MockitoExtension.class)
+@ExtendWith({MockitoExtension.class, OutputCaptureExtension.class})
 class AuthControllerGoogleCallbackTest {
 
     private static final String APP = "http://localhost:5173";
@@ -48,7 +51,6 @@ class AuthControllerGoogleCallbackTest {
     @BeforeEach
     void setUp() {
         ReflectionTestUtils.setField(controller, "appBaseUrl", APP);
-        ReflectionTestUtils.setField(controller, "cookieSecure", false);
         response = new MockHttpServletResponse();
         request = mock(HttpServletRequest.class);
     }
@@ -76,6 +78,7 @@ class AuthControllerGoogleCallbackTest {
         assertThat(response.getRedirectedUrl()).isEqualTo(APP + "/problems?login=failed");
         assertThat(response.getCookie("accessToken")).isNull();
         verify(authService, never()).authenticateGoogleUser(any(), any(), any(), any());
+        assertBurnt();
     }
 
     @Test
@@ -103,6 +106,46 @@ class AuthControllerGoogleCallbackTest {
 
         assertThat(response.getRedirectedUrl()).isEqualTo(APP + "/problems?login=failed");
         assertThat(response.getCookie("accessToken")).isNull();
+        assertBurnt();
+    }
+
+    @Test
+    void callback_alsoExpiresTheLegacyStateCookieAtRoot() throws IOException {
+        controller.googleCallback("the-code", "state-123", null, "state-123", "verifier-1", "nonce-1", request, response);
+
+        // Before SP12 the state cookie lived at Path=/; a browser still holding one drops it now.
+        assertThat(Arrays.stream(response.getCookies()))
+                .anySatisfy(cookie -> {
+                    assertThat(cookie.getName()).isEqualTo("oauthState");
+                    assertThat(cookie.getPath()).isEqualTo("/");
+                    assertThat(cookie.getMaxAge()).isZero();
+                });
+    }
+
+    /** One Secure flag drives every cookie the service sets: the session's and the three OAuth cookies. */
+    @Test
+    void theOAuthCookiesFollowTheSessionCookiesSecureFlag() throws IOException {
+        ReflectionTestUtils.setField(authCookies, "secure", true);
+        when(authService.getGoogleAuthUrl()).thenReturn(new GoogleAuthorization(
+                "https://accounts.google.com/o/oauth2/auth?x=1", "s-42", "v-42", "n-42"));
+
+        controller.getGoogleAuthUrl(response);
+        assertThat(response.getCookies()).allSatisfy(cookie -> assertThat(cookie.getSecure()).as(cookie.getName()).isTrue());
+
+        response = new MockHttpServletResponse();
+        controller.googleCallback(null, "s-42", "access_denied", "s-42", "v-42", "n-42", request, response);
+        assertThat(response.getCookies()).isNotEmpty()
+                .allSatisfy(cookie -> assertThat(cookie.getSecure()).as(cookie.getName()).isTrue());
+    }
+
+    /** Google's error parameter is anyone's input: only a short [a-z_] run of it reaches the plain-text log. */
+    @Test
+    void callback_logsOnlyASanitisedError(CapturedOutput output) throws IOException {
+        controller.googleCallback(null, "state-123", "access_denied\r\n2026-10-20 05:00:00 INFO forged line",
+                "state-123", "verifier-1", "nonce-1", request, response);
+
+        assertThat(response.getRedirectedUrl()).isEqualTo(APP + "/problems?login=failed");
+        assertThat(output).contains("error=access_denied,").doesNotContain("forged");
     }
 
     @Test

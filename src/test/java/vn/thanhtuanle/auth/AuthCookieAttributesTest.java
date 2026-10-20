@@ -28,6 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -67,6 +68,37 @@ class AuthCookieAttributesTest {
         return headers;
     }
 
+    /**
+     * The outbound call sets the three OAuth cookies and the callback expires them; returns every Set-Cookie header Tomcat
+     * sends for them.
+     */
+    static List<String> oauthSetCookies(MockMvc mockMvc, AuthService authService) throws Exception {
+        when(authService.getGoogleAuthUrl()).thenReturn(new GoogleAuthorization(
+                "https://accounts.google.com/o/oauth2/auth?x=1", "s-1", "v-1", "n-1"));
+        Rfc6265CookieProcessor tomcat = new Rfc6265CookieProcessor();
+        List<String> headers = new java.util.ArrayList<>();
+        for (MvcResult result : List.of(
+                mockMvc.perform(get("/api/v1/auth/outbound/google")).andExpect(status().isOk()).andReturn(),
+                mockMvc.perform(get("/api/v1/auth/outbound/google/callback")).andReturn())) {
+            Arrays.stream(result.getResponse().getCookies())
+                    .filter(cookie -> cookie.getName().startsWith("oauth"))
+                    .map(cookie -> tomcat.generateHeader(cookie, null))
+                    .forEach(headers::add);
+        }
+        assertThat(headers).anySatisfy(h -> assertThat(h).startsWith("oauthState=s-1;"))
+                .anySatisfy(h -> assertThat(h).startsWith("oauthVerifier=v-1;"))
+                .anySatisfy(h -> assertThat(h).startsWith("oauthNonce=n-1;"))
+                .anySatisfy(h -> assertThat(h).startsWith("oauthNonce=;").contains("Max-Age=0"));
+        return headers;
+    }
+
+    @Test
+    void oauthCookiesAreHttpOnlySameSiteLax() throws Exception {
+        assertThat(oauthSetCookies(mockMvc, authService)).allSatisfy(h -> assertThat(h)
+                .contains("; HttpOnly", "; SameSite=Lax")
+                .doesNotContain("Secure"));
+    }
+
     @Test
     void loginSetsHttpOnlySameSiteLaxCookies() throws Exception {
         assertThat(loginSetCookies(mockMvc, authService)).allSatisfy(h -> assertThat(h)
@@ -85,6 +117,12 @@ class AuthCookieAttributesTest {
         @Test
         void loginCookiesAreSecureToo() throws Exception {
             assertThat(loginSetCookies(httpsMockMvc, httpsAuthService)).allSatisfy(h -> assertThat(h)
+                    .contains("; HttpOnly", "; SameSite=Lax", "; Secure"));
+        }
+
+        @Test
+        void oauthCookiesAreSecureToo() throws Exception {
+            assertThat(oauthSetCookies(httpsMockMvc, httpsAuthService)).allSatisfy(h -> assertThat(h)
                     .contains("; HttpOnly", "; SameSite=Lax", "; Secure"));
         }
     }

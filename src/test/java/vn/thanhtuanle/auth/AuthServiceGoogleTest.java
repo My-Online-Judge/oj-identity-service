@@ -12,13 +12,18 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 import vn.thanhtuanle.auth.dto.AuthResponse;
@@ -36,6 +41,7 @@ import vn.thanhtuanle.security.LoginAttemptService;
 import vn.thanhtuanle.user.RoleRepository;
 import vn.thanhtuanle.user.UserRepository;
 
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Clock;
@@ -47,6 +53,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -59,7 +66,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
-@ExtendWith(MockitoExtension.class)
+@ExtendWith({MockitoExtension.class, OutputCaptureExtension.class})
 class AuthServiceGoogleTest {
 
     private static final String CLIENT_ID = "client-123.apps.googleusercontent.com";
@@ -202,6 +209,54 @@ class AuthServiceGoogleTest {
                 ExchangeTokenResponse.class);
 
         assertThat(parsed.getIdToken()).isEqualTo("header.payload.");
+    }
+
+    @Test
+    void theTokenResponsePrintsNoToken() {
+        String printed = ExchangeTokenResponse.builder().accessToken("access-secret").refreshToken("refresh-secret")
+                .idToken("id-secret").scope("openid email").tokenType("Bearer").build().toString();
+
+        assertThat(printed).doesNotContain("access-secret", "refresh-secret", "id-secret").contains("openid email");
+    }
+
+    /** The id token's signature is not checked: only TLS to Google's token endpoint proves who issued it. */
+    @Test
+    void theTokenUriMustBeHttps() {
+        assertThatCode(authService::requireHttpsTokenUri).doesNotThrowAnyException();
+
+        ReflectionTestUtils.setField(authService, "tokenUri", "http://oauth2.googleapis.com/token");
+        assertThatThrownBy(authService::requireHttpsTokenUri)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("https");
+    }
+
+    /** Anyone can send a made-up code to the callback: Google's refusal is a WARN with its reason, no stack trace. */
+    @Test
+    void googleRefusingTheCode_isAWarnWithItsError_andNoStackTrace(CapturedOutput output) {
+        when(restTemplate.postForEntity(eq(TOKEN_URI), any(HttpEntity.class), eq(ExchangeTokenResponse.class)))
+                .thenThrow(HttpClientErrorException.create(HttpStatus.BAD_REQUEST, "Bad Request", HttpHeaders.EMPTY,
+                        "{\"error\":\"invalid_grant\",\"error_description\":\"Bad Request\"}"
+                                .getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8));
+
+        assertThatThrownBy(() -> authService.authenticateGoogleUser(CODE, VERIFIER, NONCE, META))
+                .isInstanceOfSatisfying(AppException.class,
+                        e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.UNCATEGORIZED_EXCEPTION));
+        assertThat(output).contains("WARN", "Google refused the authorization code", "400", "invalid_grant")
+                .doesNotContain("ERROR", "HttpClientErrorException", "\tat ");
+    }
+
+    /** A Google that cannot be reached (I/O failure, timeout) is ours to look at: an ERROR with its cause. */
+    @Test
+    void aGoogleThatCannotBeReached_isAnErrorWithItsCause(CapturedOutput output) {
+        when(restTemplate.postForEntity(eq(TOKEN_URI), any(HttpEntity.class), eq(ExchangeTokenResponse.class)))
+                .thenThrow(new ResourceAccessException("I/O error on POST request",
+                        new SocketTimeoutException("request timed out")));
+
+        assertThatThrownBy(() -> authService.authenticateGoogleUser(CODE, VERIFIER, NONCE, META))
+                .isInstanceOfSatisfying(AppException.class,
+                        e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.UNCATEGORIZED_EXCEPTION));
+        assertThat(output).contains("ERROR", "Failed to exchange token with Google",
+                "SocketTimeoutException");
     }
 
     @Test

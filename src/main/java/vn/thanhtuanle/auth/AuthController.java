@@ -42,12 +42,11 @@ public class AuthController {
     private static final int REFRESH_TOKEN_MAX_AGE = 7 * 24 * 60 * 60; // 7 days
     private static final int OAUTH_COOKIE_MAX_AGE = 5 * 60; // one login round-trip
 
+    /** Where earlier versions set the state cookie. */
+    private static final String LEGACY_OAUTH_STATE_PATH = "/";
+
     private final AuthService authService;
     private final AuthCookies authCookies;
-
-    /** Set true in prod (HTTPS) so auth cookies carry the Secure flag. */
-    @Value("${app.cookie.secure:false}")
-    private boolean cookieSecure;
 
     /**
      * Frontend origin the browser is sent back to once Google redirects here.
@@ -84,11 +83,14 @@ public class AuthController {
         writeOAuthCookie(response, OAUTH_STATE_COOKIE, null, 0);
         writeOAuthCookie(response, OAUTH_VERIFIER_COOKIE, null, 0);
         writeOAuthCookie(response, OAUTH_NONCE_COOKIE, null, 0);
+        // And the state cookie earlier versions left at Path=/ (harmless, but it would linger for its 5 minutes).
+        authCookies.writeOAuth(response, OAUTH_STATE_COOKIE, null, 0, LEGACY_OAUTH_STATE_PATH);
 
         boolean stateMatched = statesMatch(state, expectedState);
         if (error != null || code == null || codeVerifier == null || nonce == null || !stateMatched) {
+            // The error parameter is anyone's input: only its error-code-shaped start reaches the log.
             log.warn("Google callback rejected (error={}, hasCode={}, stateMatched={}, hasVerifier={}, hasNonce={})",
-                    error, code != null, stateMatched, codeVerifier != null, nonce != null);
+                    OAuthErrors.loggable(error), code != null, stateMatched, codeVerifier != null, nonce != null);
             response.sendRedirect(appBaseUrl + "/problems?login=failed");
             return;
         }
@@ -179,6 +181,6 @@ public class AuthController {
     }
 
     private void writeOAuthCookie(HttpServletResponse response, String name, String value, int maxAge) {
-        AuthCookies.write(response, name, value, maxAge, cookieSecure, OAUTH_COOKIE_PATH);
+        authCookies.writeOAuth(response, name, value, maxAge, OAUTH_COOKIE_PATH);
     }
 }

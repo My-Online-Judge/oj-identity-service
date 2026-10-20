@@ -1,15 +1,23 @@
 package vn.thanhtuanle.auth;
 
+import com.nimbusds.jose.EncryptionMethod;
 import com.nimbusds.jose.JOSEException;
+import com.nimbusds.jose.JWEAlgorithm;
+import com.nimbusds.jose.JWEHeader;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
+import com.nimbusds.jose.crypto.RSAEncrypter;
 import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jose.jwk.RSAKey;
 import com.nimbusds.jose.jwk.gen.RSAKeyGenerator;
+import com.nimbusds.jwt.EncryptedJWT;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.PlainJWT;
 import com.nimbusds.jwt.SignedJWT;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.oj.common.web.error.AppException;
 
@@ -17,10 +25,12 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Date;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+@ExtendWith(OutputCaptureExtension.class)
 class GoogleIdTokenVerifierTest {
 
     private static final String CLIENT_ID = "client-123.apps.googleusercontent.com";
@@ -119,5 +129,36 @@ class GoogleIdTokenVerifierTest {
                 .isFalse();
         assertThat(verifier.verify(plain(googleClaims().claim("email_verified", null)), NONCE).emailVerified())
                 .isFalse();
+    }
+
+    @Test
+    void rejectsClaimsOfTheWrongType() {
+        assertRejected(plain(googleClaims().claim("nonce", 123)));
+        assertRejected(plain(googleClaims().claim("email", List.of("alice@example.com"))));
+        assertRejected(plain(googleClaims().claim("name", 42)));
+    }
+
+    @Test
+    void rejectsAMissingIssuer_andSaysSo(CapturedOutput output) {
+        assertRejected(plain(googleClaims().issuer(null)));
+
+        assertThat(output).contains("Google id token refused: issuer").doesNotContain("malformed claim");
+    }
+
+    @Test
+    void acceptsAnAudienceArrayThatHoldsTheClientId_only() {
+        assertThat(verifier.verify(plain(googleClaims().audience(List.of("another-client", CLIENT_ID))), NONCE))
+                .isNotNull();
+        assertRejected(plain(googleClaims().audience(List.of("another-client", "a-third-client"))));
+    }
+
+    @Test
+    void rejectsAnEncryptedToken() throws JOSEException {
+        RSAKey key = new RSAKeyGenerator(2048).generate();
+        EncryptedJWT jwe = new EncryptedJWT(new JWEHeader(JWEAlgorithm.RSA_OAEP_256, EncryptionMethod.A128GCM),
+                googleClaims().build());
+        jwe.encrypt(new RSAEncrypter(key.toRSAPublicKey()));
+
+        assertRejected(jwe.serialize());
     }
 }

@@ -37,6 +37,11 @@ public class AuthCookies {
         response.addCookie(cookie);
     }
 
+    /** One of the Google sign-in's short-lived cookies (state, PKCE verifier, nonce), under the same Secure flag. */
+    public void writeOAuth(HttpServletResponse response, String name, String value, int maxAge, String path) {
+        write(response, name, value, maxAge, secure, path);
+    }
+
     public void writeAccess(HttpServletResponse response, String value, int maxAge) {
         write(response, ACCESS_TOKEN_COOKIE, value, maxAge, secure, ROOT_PATH);
     }
