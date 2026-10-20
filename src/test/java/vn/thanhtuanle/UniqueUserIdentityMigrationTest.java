@@ -61,8 +61,8 @@ class UniqueUserIdentityMigrationTest {
             ps.executeUpdate();
         }
 
-        assertThatCode(() -> flyway("latest").migrate()).doesNotThrowAnyException();
-        assertThat(flyway("latest").info().current().getVersion().getVersion()).isEqualTo("6");
+        assertThatCode(() -> flyway("6").migrate()).doesNotThrowAnyException();
+        assertThat(flyway("6").info().current().getVersion().getVersion()).isEqualTo("6");
         assertThat(indexExists("ux_users_username_lower")).isTrue();
     }
 
