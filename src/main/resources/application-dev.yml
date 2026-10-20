@@ -51,8 +51,6 @@ openapi:
 logging:
   level:
     vn.thanhtuanle: DEBUG
-  file:
-    name: log/app.log
 
 application:
   security:

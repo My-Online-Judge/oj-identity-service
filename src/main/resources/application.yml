@@ -37,6 +37,10 @@ management:
       exposure:
         # Explicit allowlist, NOT '*' (a heap dump would leak the JWT RSA private key).
         include: health,info,prometheus,metrics
+  metrics:
+    distribution:
+      percentiles-histogram:
+        "[http.server.requests]": true
   endpoint:
     heapdump:
       access: none

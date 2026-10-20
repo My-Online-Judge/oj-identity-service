@@ -45,8 +45,6 @@ springdoc:
 logging:
   level:
     vn.thanhtuanle: INFO
-  file:
-    name: log/app.log
 
 application:
   security:
