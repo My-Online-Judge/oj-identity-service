@@ -74,7 +74,7 @@ class LoginRateLimiterRedisTest {
             connection.serverCommands().flushAll();
             return null;
         });
-        limiter = new LoginRateLimiter(redis, new SimpleMeterRegistry(), 30);
+        limiter = new LoginRateLimiter(redis, new SimpleMeterRegistry(), 30, 50);
     }
 
     private static ClientMeta from(String ip) {
@@ -338,7 +338,7 @@ class LoginRateLimiterRedisTest {
 
     @Test
     void theIpLimitIsTheConfiguredOne() {
-        LoginRateLimiter lab = new LoginRateLimiter(redis, new SimpleMeterRegistry(), 3);
+        LoginRateLimiter lab = new LoginRateLimiter(redis, new SimpleMeterRegistry(), 3, 50);
         lab.recordFailure(lab.reserve("user0", from("10.0.0.1")));
         lab.recordFailure(lab.reserve("user1", from("10.0.0.1")));
         assertThat(redis.hasKey("oj:rl:lock:ip:10.0.0.1")).isFalse();
@@ -369,6 +369,18 @@ class LoginRateLimiterRedisTest {
         return redis.hasKey("oj:rl:lock:ip:" + address);
     }
 
+    /** The application, with these environment variables as its whole environment (how .env.identity sets them). */
+    private ApplicationContextRunner application(Map<String, Object> environmentVariables) {
+        return application().withInitializer(context -> {
+            ConfigurableEnvironment environment = context.getEnvironment();
+            environment.getPropertySources().replace(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+                    new SystemEnvironmentPropertySource(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+                            environmentVariables));
+            // Bound the way Spring Boot binds them.
+            ConfigurationPropertySources.attach(environment);
+        });
+    }
+
     @Test
     void theIpLimitIsOjLoginIpLimit_settableAsOJ_LOGIN_IP_LIMIT_andThirtyByDefault() {
         application().run(context -> {
@@ -378,22 +390,50 @@ class LoginRateLimiterRedisTest {
         });
         application().withPropertyValues("oj.login.ip-limit=3").run(context ->
                 assertThat(failuresLockAnAddress(context.getBean(LoginRateLimiter.class), 3)).isTrue());
-        // How .env.identity sets it: an environment variable, bound the way Spring Boot binds them.
-        application()
-                .withInitializer(context -> {
-                    ConfigurableEnvironment environment = context.getEnvironment();
-                    environment.getPropertySources().replace(
-                            StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
-                            new SystemEnvironmentPropertySource(
-                                    StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
-                                    Map.of("OJ_LOGIN_IP_LIMIT", "4")));
-                    ConfigurationPropertySources.attach(environment);
-                })
-                .run(context -> {
-                    LoginRateLimiter fromEnv = context.getBean(LoginRateLimiter.class);
-                    assertThat(failuresLockAnAddress(fromEnv, 3)).isFalse();
-                    assertThat(failuresLockAnAddress(fromEnv, 4)).isTrue();
-                });
+        application(Map.of("OJ_LOGIN_IP_LIMIT", "4")).run(context -> {
+            LoginRateLimiter fromEnv = context.getBean(LoginRateLimiter.class);
+            assertThat(failuresLockAnAddress(fromEnv, 3)).isFalse();
+            assertThat(failuresLockAnAddress(fromEnv, 4)).isTrue();
+        });
+    }
+
+    @Test
+    void theAccountLimitIsTheConfiguredOne() {
+        LoginRateLimiter demo = new LoginRateLimiter(redis, new SimpleMeterRegistry(), 30, 3);
+        demo.recordFailure(demo.reserve("alice", from("10.0.0.1")));
+        demo.recordFailure(demo.reserve("alice", from("10.0.0.2")));
+        assertThat(redis.hasKey("oj:rl:lock:account:alice")).isFalse();
+
+        demo.recordFailure(demo.reserve("alice", from("10.0.0.3")));
+
+        assertThatThrownBy(() -> demo.reserve("alice", from("10.0.0.4")))
+                .isInstanceOfSatisfying(RateLimitedException.class, e ->
+                        assertThat(e.getRetryAfterSeconds()).isBetween(899L, 900L));
+    }
+
+    /** Whether {@code failures} failures of one fresh account, each from its own address, lock it. */
+    private static boolean failuresLockAnAccount(LoginRateLimiter limiter, int failures) {
+        String username = "shared" + ADDRESSES.incrementAndGet();
+        for (int i = 0; i < failures; i++) {
+            limiter.recordFailure(limiter.reserve(username, from("10.8." + (i / 250) + "." + (i % 250))));
+        }
+        return redis.hasKey("oj:rl:lock:account:" + username);
+    }
+
+    @Test
+    void theAccountLimitIsOjLoginAccountLimit_settableAsOJ_LOGIN_ACCOUNT_LIMIT_andFiftyByDefault() {
+        application().run(context -> {
+            LoginRateLimiter byDefault = context.getBean(LoginRateLimiter.class);
+            assertThat(failuresLockAnAccount(byDefault, 49)).isFalse();
+            assertThat(failuresLockAnAccount(byDefault, 50)).isTrue();
+        });
+        application().withPropertyValues("oj.login.account-limit=3").run(context ->
+                assertThat(failuresLockAnAccount(context.getBean(LoginRateLimiter.class), 3)).isTrue());
+        application(Map.of("OJ_LOGIN_ACCOUNT_LIMIT", "4")).run(context -> {
+            LoginRateLimiter fromEnv = context.getBean(LoginRateLimiter.class);
+            assertThat(failuresLockAnAccount(fromEnv, 3)).isFalse();
+            assertThat(failuresLockAnAccount(fromEnv, 4)).isTrue();
+        });
     }
 
     @Test

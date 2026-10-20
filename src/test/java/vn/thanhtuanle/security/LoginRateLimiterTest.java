@@ -51,7 +51,7 @@ class LoginRateLimiterTest {
     void setUp() {
         registry = new SimpleMeterRegistry();
         when(redis.opsForValue()).thenReturn(valueOps);
-        limiter = new LoginRateLimiter(redis, registry, 30);
+        limiter = new LoginRateLimiter(redis, registry, 30, 50);
     }
 
     private double fallbacks() {
@@ -101,7 +101,7 @@ class LoginRateLimiterTest {
     @Test
     @SuppressWarnings("unchecked")
     void aFailureIsCountedForItsAddress_whichLocksAtTheConfiguredLimit() {
-        new LoginRateLimiter(redis, registry, 300).recordFailure(new Attempt("alice", "1.2.3.4", 1, 1));
+        new LoginRateLimiter(redis, registry, 300, 50).recordFailure(new Attempt("alice", "1.2.3.4", 1, 1));
 
         ArgumentCaptor<List<String>> keys = ArgumentCaptor.forClass(List.class);
         ArgumentCaptor<Object[]> args = ArgumentCaptor.forClass(Object[].class);

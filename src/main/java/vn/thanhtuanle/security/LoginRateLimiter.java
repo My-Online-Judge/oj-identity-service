@@ -26,9 +26,9 @@ import java.util.concurrent.TimeUnit;
  * <ul>
  *   <li>a lock in force ({@code oj:rl:lock:} + the same suffix), the IP's included, refuses it with 429 and no
  *       password check;</li>
- *   <li>otherwise it is counted. The one that goes over a limit (5 per pair, 50 per account) locks that key in the
- *       same step (for {@link #PROBE_LOCK_TTL} 60 s, until its failure makes it 15 minutes) and is let through as the
- *       single probe; everything after it is refused.</li>
+ *   <li>otherwise it is counted. The one that goes over a limit (5 per pair, 50 per account by default,
+ *       {@code oj.login.account-limit}) locks that key in the same step (for {@link #PROBE_LOCK_TTL} 60 s, until its
+ *       failure makes it 15 minutes) and is let through as the single probe; everything after it is refused.</li>
  * </ul>
  * A failure keeps its places, and the failure that reaches a limit locks it ({@link #recordFailure}). A success hands
  * its places back, forgives its pair and lifts a lock it set as the probe ({@link #recordSuccess}). So a burst gets at
@@ -62,7 +62,6 @@ public class LoginRateLimiter {
     static final Duration ACCOUNT_WINDOW = Duration.ofHours(1);
     static final Duration LOCK = Duration.ofMinutes(15);
     static final int PAIR_LIMIT = 5;
-    static final int ACCOUNT_LIMIT = 50;
     static final int PASSWORD_CHANGE_LIMIT = 5;
     static final Duration MAX_BACKOFF = Duration.ofSeconds(8);
     /** The Retry-After of a refusal by a probe's lock: the probe is in flight, and usually settles within a second. */
@@ -190,11 +189,15 @@ public class LoginRateLimiter {
     private final Counter fallbacks;
     /** Failed password checks from one address in {@link #WINDOW} that lock it ({@code oj.login.ip-limit}). */
     private final int ipLimit;
+    /** Attempts on one account in {@link #ACCOUNT_WINDOW} past which it locks ({@code oj.login.account-limit}). */
+    private final int accountLimit;
 
     public LoginRateLimiter(StringRedisTemplate redis, MeterRegistry registry,
-                            @Value("${oj.login.ip-limit:30}") int ipLimit) {
+                            @Value("${oj.login.ip-limit:30}") int ipLimit,
+                            @Value("${oj.login.account-limit:50}") int accountLimit) {
         this.redis = redis;
         this.ipLimit = ipLimit;
+        this.accountLimit = accountLimit;
         // Held for cheap increments; not a guarantee of an always-visible zero series (see the note
         // in SubmissionRateLimiter — alerts are absent-safe rather than relying on pre-registration).
         this.throttled = Counter.builder("oj.login.rate_limited")
@@ -283,7 +286,7 @@ public class LoginRateLimiter {
         String failToken = FAIL_LOCK + UUID.randomUUID();
         try {
             lockAtLimit(pair(attempt.username(), attempt.ip()), attempt.pairCount(), PAIR_LIMIT, failToken);
-            lockAtLimit(account(attempt.username()), attempt.accountCount(), ACCOUNT_LIMIT, failToken);
+            lockAtLimit(account(attempt.username()), attempt.accountCount(), accountLimit, failToken);
             countIpFailure(attempt.ip(), failToken);
         } catch (Exception e) {
             failOpen("lock not set", e);
@@ -409,7 +412,7 @@ public class LoginRateLimiter {
     }
 
     /** The dimensions an attempt takes a place in before its password is checked (not the IP: it counts failures). */
-    private static List<Dimension> dimensions(String username, String ip) {
+    private List<Dimension> dimensions(String username, String ip) {
         List<Dimension> dimensions = new ArrayList<>(2);
         String pair = pair(username, ip);
         if (pair != null) {
@@ -417,7 +420,7 @@ public class LoginRateLimiter {
         }
         String account = account(username);
         if (account != null) {
-            dimensions.add(new Dimension(Kind.ACCOUNT, account, ACCOUNT_LIMIT, ACCOUNT_WINDOW));
+            dimensions.add(new Dimension(Kind.ACCOUNT, account, accountLimit, ACCOUNT_WINDOW));
         }
         return dimensions;
     }
