@@ -86,7 +86,10 @@ class UserServiceChangePasswordTest {
 
         assertThat(u.getPassword()).isEqualTo("NEW");
         verify(userRepository).save(u);
-        verify(tokenRepository).deleteAllByUserId(id);
+        // Under the user's row lock, so a concurrent refresh cannot leave a successor behind.
+        var order = inOrder(userRepository, tokenRepository);
+        order.verify(userRepository).lockById(id);
+        order.verify(tokenRepository).deleteAllByUserId(id);
         verify(sessionRevoker).revokeAccessTokensAfterCommit(List.of(id));
         verify(gauge).refresh();
     }

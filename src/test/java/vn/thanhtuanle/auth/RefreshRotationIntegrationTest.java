@@ -56,6 +56,7 @@ class RefreshRotationIntegrationTest {
     @Autowired TokenRepository tokenRepository;
     @Autowired PasswordEncoder passwordEncoder;
     @Autowired MutableClock clock;
+    @Autowired vn.thanhtuanle.common.util.JwtUtil jwtUtil;
 
     @MockitoBean SessionRevoker sessionRevoker;
     @MockitoBean LoginRateLimiter loginRateLimiter;
@@ -125,6 +126,16 @@ class RefreshRotationIntegrationTest {
         assertThat(rotated.getPath()).isEqualTo("/api/v1/auth");
         assertThat(tokenRepository.findByToken(TokenHasher.sha256Hex(original)))
                 .hasValueSatisfying(row -> assertThat(row.getRotatedAt()).isNotNull());
+    }
+
+    @Test
+    void theSessionEndsOneRefreshTtlAfterLogin() throws Exception {
+        String original = login();
+
+        String rotated = liveRefreshCookie(refresh(original)).getValue();
+
+        // The successor keeps the session's end instead of sliding it a refresh TTL further.
+        assertThat(jwtUtil.extractExpiration(rotated)).isEqualTo(jwtUtil.extractExpiration(original));
     }
 
     @Test

@@ -15,7 +15,10 @@ public interface TokenRepository extends JpaRepository<Token, UUID> {
     /** {@code token} is the SHA-256 hex of the presented token ({@link vn.thanhtuanle.auth.TokenHasher}). */
     Optional<Token> findByToken(String token);
 
-    void deleteAllByUserId(UUID userId);
+    /** One DELETE statement (a derived delete would select, then remove row by row). Take the user's lock first. */
+    @Modifying
+    @Query("delete from Token t where t.user.id = :userId")
+    int deleteAllByUserId(@Param("userId") UUID userId);
 
     void deleteAllByUserIdAndTokenType(UUID userId, TokenType tokenType);
 

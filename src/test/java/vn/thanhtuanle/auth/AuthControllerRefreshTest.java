@@ -50,7 +50,7 @@ class AuthControllerRefreshTest {
                         .refreshToken("new-refresh-token")
                         .build());
 
-        ApiResponse<Void> body = controller.refresh("the-refresh-token", null, request, response);
+        ApiResponse<Void> body = controller.refresh("the-refresh-token", request, response);
 
         // The endpoint sets the cookies itself -- that's the only thing the caller needs.
         assertThat(response.getCookie("accessToken").getValue()).isEqualTo("new-access-token");
@@ -73,7 +73,7 @@ class AuthControllerRefreshTest {
         when(authService.refreshAccessToken(any(), any(ClientMeta.class)))
                 .thenReturn(AuthResponse.builder().build());
 
-        controller.refresh("the-refresh-token", null, request, response);
+        controller.refresh("the-refresh-token", request, response);
 
         assertThat(response.getCookies()).isEmpty();
     }

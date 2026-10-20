@@ -26,6 +26,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.Date;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -61,19 +62,23 @@ class AuthServiceRefreshTest {
     private AuthService authService;
 
     private final UUID storedId = UUID.randomUUID();
+    /** When the presented refresh token expires: one refresh TTL after the login that started the session. */
+    private static final Date SESSION_END = Date.from(Instant.parse("2026-10-22T09:00:00Z"));
 
     private User arrangeValidRefresh(String refreshToken, UUID userId) {
         User user = arrangeStoredRefresh(refreshToken, userId);
         when(tokenRepository.markRotated(storedId, now())).thenReturn(1);
         when(jwtUtil.generateToken(user)).thenReturn("new.access.token");
-        when(jwtUtil.generateRefreshToken(user)).thenReturn("new.refresh.token");
+        when(jwtUtil.extractExpiration(refreshToken)).thenReturn(SESSION_END);
+        when(jwtUtil.generateRefreshToken(user, SESSION_END)).thenReturn("new.refresh.token");
         return user;
     }
 
     private User arrangeStoredRefresh(String refreshToken, UUID userId) {
         User user = User.builder().username("alice@example.com").status(CommonStatus.ACTIVE.getValue()).build();
         user.setId(userId);
-        Token stored = Token.builder().token(TokenHasher.sha256Hex(refreshToken)).tokenType(TokenType.REFRESH).build();
+        Token stored = Token.builder().token(TokenHasher.sha256Hex(refreshToken)).tokenType(TokenType.REFRESH)
+                .user(user).build();
         stored.setId(storedId);
         when(jwtUtil.isTokenExpired(refreshToken)).thenReturn(false);
         when(tokenRepository.findByToken(TokenHasher.sha256Hex(refreshToken))).thenReturn(Optional.of(stored));
@@ -135,6 +140,32 @@ class AuthServiceRefreshTest {
     }
 
     @Test
+    void refresh_locksTheUserRowBeforeRotating() {
+        UUID userId = UUID.randomUUID();
+        arrangeValidRefresh("valid.refresh.token", userId);
+
+        authService.refreshAccessToken("valid.refresh.token", META);
+
+        // Serialises this rotation with any logout, login or reuse detection of the same user.
+        InOrder order = inOrder(tokenRepository, userRepository);
+        order.verify(tokenRepository).findByToken(TokenHasher.sha256Hex("valid.refresh.token"));
+        order.verify(userRepository).lockById(userId);
+        order.verify(tokenRepository).markRotated(storedId, now());
+    }
+
+    @Test
+    void refresh_theSuccessorNeverOutlivesThePresentedToken() {
+        UUID userId = UUID.randomUUID();
+        User user = arrangeValidRefresh("valid.refresh.token", userId);
+
+        authService.refreshAccessToken("valid.refresh.token", META);
+
+        // The session ends one refresh TTL after login instead of sliding forever.
+        verify(jwtUtil).generateRefreshToken(user, SESSION_END);
+        verify(jwtUtil, never()).generateRefreshToken(any());
+    }
+
+    @Test
     void refresh_losingTheRotationRace_issuesNothing() {
         UUID userId = UUID.randomUUID();
         arrangeStoredRefresh("valid.refresh.token", userId);
@@ -156,7 +187,8 @@ class AuthServiceRefreshTest {
         String refreshToken = "valid.refresh.token";
         User user = User.builder().username("alice@example.com").status(CommonStatus.INACTIVE.getValue()).build();
         user.setId(userId);
-        Token stored = Token.builder().token(TokenHasher.sha256Hex(refreshToken)).tokenType(TokenType.REFRESH).build();
+        Token stored = Token.builder().token(TokenHasher.sha256Hex(refreshToken)).tokenType(TokenType.REFRESH)
+                .user(user).build();
         when(jwtUtil.isTokenExpired(refreshToken)).thenReturn(false);
         when(tokenRepository.findByToken(TokenHasher.sha256Hex(refreshToken))).thenReturn(Optional.of(stored));
         when(jwtUtil.extractUsername(refreshToken)).thenReturn("alice@example.com");

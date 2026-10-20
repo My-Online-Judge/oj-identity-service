@@ -202,6 +202,7 @@ public class UserService {
 
     /** A new credential invalidates refresh tokens now and live access tokens once the transaction commits. */
     private void endSessions(UUID userId) {
+        userRepository.lockById(userId);
         tokenRepository.deleteAllByUserId(userId);
         sessionRevoker.revokeAccessTokensAfterCommit(List.of(userId));
         defaultAdminPasswordGauge.refresh();

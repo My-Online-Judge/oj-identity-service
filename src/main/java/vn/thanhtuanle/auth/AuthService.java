@@ -43,9 +43,11 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Base64;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -200,6 +202,7 @@ public class AuthService {
         var jwtToken = jwtUtil.generateToken(user);
         var refreshToken = jwtUtil.generateRefreshToken(user);
 
+        userRepository.lockById(user.getId());
         revokeAllUserTokens(user);
         savedUserToken(user, jwtToken, TokenType.ACCESS, meta);
         savedUserToken(user, refreshToken, TokenType.REFRESH, meta);
@@ -247,7 +250,7 @@ public class AuthService {
             throw e;
         }
 
-        AuthResponse tokens = transactionTemplate.execute(status -> startPasswordSession(user, meta));
+        AuthResponse tokens = transactionTemplate.execute(status -> startPasswordSession(user.getId(), meta));
 
         loginRateLimiter.clear(username, meta);
         loginAttemptService.record(username, meta, true, null);
@@ -256,8 +259,12 @@ public class AuthService {
         return tokens;
     }
 
-    /** A successful password login's writes: this login's tokens replace every earlier one. */
-    private AuthResponse startPasswordSession(User user, ClientMeta meta) {
+    /**
+     * A successful password login's writes: this login's tokens replace every earlier one. They go to the user's row as
+     * locked now, not to the copy read before the password check, so a concurrent change to the user is not undone.
+     */
+    private AuthResponse startPasswordSession(UUID userId, ClientMeta meta) {
+        User user = userRepository.lockById(userId).orElseThrow(() -> new AppException(ErrorCode.USER_NOT_EXISTED));
         String accessToken = jwtUtil.generateToken(user);
         String refreshToken = jwtUtil.generateRefreshToken(user);
 
@@ -290,6 +297,7 @@ public class AuthService {
         tokenRepository.save(token);
     }
 
+    /** Callers hold the user's row lock ({@link UserRepository#lockById}), so a concurrent rotation cannot slip by. */
     private void revokeAllUserTokens(User user) {
         tokenRepository.deleteAllByUserId(user.getId());
     }
@@ -298,7 +306,11 @@ public class AuthService {
      * Rotates the refresh token: the presented one is marked rotated and a new access and refresh token are issued.
      * Returns both tokens, or both {@code null} when a concurrent refresh already rotated this token (nothing issued).
      * A rotated token presented again after {@link #REUSE_GRACE} means it was copied: every session of the user ends.
-     * Those deletes must commit even though the request answers 401, hence {@code dontRollbackOn}.
+     * The successor expires no later than the presented token, so a session ends one refresh TTL after its login.
+     *
+     * <p>{@code dontRollbackOn}: only the reuse branch relies on it, so that its deletes commit even though the
+     * request answers 401. It applies to every AppException, though: one thrown after {@code markRotated} would commit
+     * a rotation with no successor and sign the user out. Nothing after {@code markRotated} may throw one.
      */
     @Transactional(dontRollbackOn = AppException.class)
     public AuthResponse refreshAccessToken(String refreshToken, ClientMeta meta) {
@@ -320,6 +332,9 @@ public class AuthService {
         if (stored.isRevoked() || stored.isExpired() || stored.getTokenType() != TokenType.REFRESH) {
             throw new AppException(ErrorCode.INVALID_CREDENTIALS);
         }
+        // Serialise with every other token change of this user. A concurrent refresh that won meanwhile leaves this
+        // one's markRotated at 0 below; a logout that won leaves no row for it to rotate.
+        userRepository.lockById(stored.getUser().getId());
 
         LocalDateTime now = LocalDateTime.now(clock);
         if (stored.getRotatedAt() != null) {
@@ -343,13 +358,16 @@ public class AuthService {
             throw new AppException(ErrorCode.USER_BLOCKED);
         }
 
+        // The session's end: the successor never outlives the token it replaces. Read before anything is written.
+        Date sessionEnd = jwtUtil.extractExpiration(refreshToken);
+
         // Conditional on rotated_at still being null: of two refreshes racing with the same token, one wins.
         if (tokenRepository.markRotated(stored.getId(), now) == 0) {
             return AuthResponse.builder().build();
         }
 
         String newAccessToken = jwtUtil.generateToken(user);
-        String newRefreshToken = jwtUtil.generateRefreshToken(user);
+        String newRefreshToken = jwtUtil.generateRefreshToken(user, sessionEnd);
         // One ACCESS row per live session: at a 15-minute TTL, appending a row per
         // refresh would add ~96 rows/user/day that nothing cleans up until the next login.
         tokenRepository.deleteAllByUserIdAndTokenType(user.getId(), TokenType.ACCESS);
@@ -380,29 +398,37 @@ public class AuthService {
         return userMapper.toResponse(user);
     }
 
+    /**
+     * Ends every session of the caller. The caller is found from a verified access token or, when that has expired
+     * (the common case with 15-minute tokens: the request is then anonymous), from the refresh cookie. With neither
+     * there is nothing to end, and the caller still clears the cookies.
+     */
     @Transactional
-    public void logout() {
+    public void logout(String refreshToken) {
         log.info("Logout request received");
-        var authentication = SecurityContextHolder.getContext().getAuthentication();
-        String username = authentication.getName();
-
-        User user = userRepository.findByUsername(username)
-                .orElseThrow(() -> {
-                    log.warn("User not found with username: {}", username);
-                    return new AppException(ErrorCode.USER_NOT_EXISTED);
-                });
-
-        // Revoke the access token the caller is holding right now: park its jti in Redis until it
-        // would have expired, so the gateway strips it from any further request (the DB revoke below
-        // only invalidates refresh tokens — access tokens are verified without the DB).
-        if (authentication instanceof JwtAuthenticationToken jwtAuthentication) {
+        Optional<UUID> userId = Optional.empty();
+        // Never by an anonymous request's name: that is "anonymousUser", not a user.
+        if (SecurityContextHolder.getContext().getAuthentication() instanceof JwtAuthenticationToken jwtAuthentication) {
+            // Revoke the access token the caller is holding right now: park its jti in Redis until it
+            // would have expired, so the gateway strips it from any further request (the DB revoke below
+            // only invalidates refresh tokens — access tokens are verified without the DB).
             String accessToken = jwtAuthentication.getToken().getTokenValue();
             tokenBlocklist.block(jwtUtil.extractJti(accessToken), jwtUtil.getRemainingTtlMillis(accessToken));
+            userId = userRepository.findByUsername(jwtAuthentication.getName()).map(User::getId);
+        }
+        if (userId.isEmpty() && refreshToken != null && !refreshToken.isBlank()) {
+            userId = tokenRepository.findByToken(TokenHasher.sha256Hex(refreshToken)).map(row -> row.getUser().getId());
+        }
+        if (userId.isEmpty()) {
+            log.info("Logout without a session: nothing to end");
+            return;
         }
 
-        revokeAllUserTokens(user);
+        UUID uid = userId.get();
+        userRepository.lockById(uid);
+        tokenRepository.deleteAllByUserId(uid);
         // Every device's access token, not only the caller's: the gateway strips tokens issued before the cutoff.
-        sessionRevoker.revokeAccessTokensAfterCommit(List.of(user.getId()));
+        sessionRevoker.revokeAccessTokensAfterCommit(List.of(uid));
         log.info("User logged out successfully");
     }
 

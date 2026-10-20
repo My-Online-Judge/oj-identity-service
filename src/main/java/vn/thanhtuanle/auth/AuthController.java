@@ -108,9 +108,15 @@ public class AuthController {
 
     @Operation(summary = "Logout", description = "End every session of the user and clear cookies")
     @PostMapping("/logout")
-    public ApiResponse<Void> logout(HttpServletResponse response) {
-        authService.logout();
-        authCookies.clearSession(response);
+    public ApiResponse<Void> logout(
+            @CookieValue(value = REFRESH_TOKEN_COOKIE, required = false) String refreshCookie,
+            HttpServletResponse response) {
+        try {
+            authService.logout(refreshCookie);
+        } finally {
+            // Whatever happened above: a refresh cookie left in the browser would sign the user straight back in.
+            authCookies.clearSession(response);
+        }
         return ApiResponse.success();
     }
 
@@ -124,12 +130,11 @@ public class AuthController {
     @PostMapping("/refresh")
     public ApiResponse<Void> refresh(
             @CookieValue(value = REFRESH_TOKEN_COOKIE, required = false) String refreshCookie,
-            @RequestBody(required = false) Map<String, String> body,
             HttpServletRequest httpRequest,
             HttpServletResponse response) {
-        String refreshToken = refreshCookie != null ? refreshCookie
-                : (body != null ? body.get("refreshToken") : null);
-        var authResponse = authService.refreshAccessToken(refreshToken, ClientMeta.from(httpRequest));
+        // The cookie is the only source. A client sending the token in the body would never see the rotated
+        // cookie, and its second refresh would present a used token: reuse, every session ended.
+        var authResponse = authService.refreshAccessToken(refreshCookie, ClientMeta.from(httpRequest));
         // No tokens: a concurrent request (another tab) rotated this refresh token a moment ago and its
         // response carries the new cookies, so this one leaves the browser's cookies alone.
         if (authResponse.getAccessToken() != null) {

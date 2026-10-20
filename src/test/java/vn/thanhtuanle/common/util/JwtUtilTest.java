@@ -15,6 +15,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class JwtUtilTest {
 
     private static final long ACCESS_TTL = 900_000L; // 15 min
+    private static final long REFRESH_TTL = 259_200_000L; // 3 days
 
     private JwtUtil jwtUtil;
 
@@ -37,7 +38,7 @@ class JwtUtilTest {
         ReflectionTestUtils.setField(jwtUtil, "rsaPrivateKeyPem", pemBase64("PRIVATE KEY", pair.getPrivate().getEncoded()));
         ReflectionTestUtils.setField(jwtUtil, "rsaPublicKeyPem", pemBase64("PUBLIC KEY", pair.getPublic().getEncoded()));
         ReflectionTestUtils.setField(jwtUtil, "jwtExpiration", ACCESS_TTL);
-        ReflectionTestUtils.setField(jwtUtil, "refreshExpiration", 259_200_000L);
+        ReflectionTestUtils.setField(jwtUtil, "refreshExpiration", REFRESH_TTL);
         jwtUtil.init();
     }
 
@@ -62,6 +63,26 @@ class JwtUtilTest {
         String jtiB = jwtUtil.extractJti(jwtUtil.generateToken(user()));
 
         assertThat(jtiA).isNotEqualTo(jtiB);
+    }
+
+    @Test
+    void aRefreshTokenNeverOutlivesTheSessionItContinues() {
+        java.util.Date sessionEnd = new java.util.Date(System.currentTimeMillis() + 60_000L);
+
+        String successor = jwtUtil.generateRefreshToken(user(), sessionEnd);
+
+        // JWT exp has whole seconds.
+        assertThat(jwtUtil.extractExpiration(successor).getTime() / 1000).isEqualTo(sessionEnd.getTime() / 1000);
+    }
+
+    @Test
+    void aRefreshTokenLastsAtMostOneRefreshTtl() {
+        java.util.Date farAway = new java.util.Date(System.currentTimeMillis() + 10 * REFRESH_TTL);
+
+        String successor = jwtUtil.generateRefreshToken(user(), farAway);
+
+        long remaining = jwtUtil.extractExpiration(successor).getTime() - System.currentTimeMillis();
+        assertThat(remaining).isBetween(REFRESH_TTL - 5_000L, REFRESH_TTL);
     }
 
     @Test

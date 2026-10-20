@@ -5,13 +5,17 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.MediaType;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import vn.thanhtuanle.common.exception.ErrorCode;
+import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.config.SecurityConfig;
+import vn.thanhtuanle.oj.common.web.error.AppException;
 import vn.thanhtuanle.oj.common.security.OjJwtAuthenticationFilter;
 import vn.thanhtuanle.oj.common.web.security.OjAccessDeniedHandler;
 import vn.thanhtuanle.oj.common.web.security.OjAuthenticationEntryPoint;
@@ -20,6 +24,11 @@ import java.util.Arrays;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -53,6 +62,43 @@ class AuthCookiePathTest {
     @Test
     void logoutExpiresTheRefreshCookieOnBothPaths() throws Exception {
         MvcResult result = mockMvc.perform(post("/api/v1/auth/logout")).andExpect(status().isOk()).andReturn();
+
+        assertSessionCookiesExpired(result);
+    }
+
+    @Test
+    void logoutExpiresTheCookiesEvenWhenEndingTheSessionFails() throws Exception {
+        doThrow(new IllegalStateException("database unavailable")).when(authService).logout(any());
+
+        MvcResult result = mockMvc.perform(post("/api/v1/auth/logout")).andReturn();
+
+        assertThat(result.getResponse().getStatus()).isEqualTo(500);
+        assertSessionCookiesExpired(result);
+    }
+
+    @Test
+    void logoutHandsTheRefreshCookieToTheService() throws Exception {
+        mockMvc.perform(post("/api/v1/auth/logout").cookie(new jakarta.servlet.http.Cookie("refreshToken", "RT")))
+                .andExpect(status().isOk());
+
+        verify(authService).logout("RT");
+    }
+
+    @Test
+    void aRefreshTokenInTheBodyIsIgnored() throws Exception {
+        // The cookie is the only source: a body-only client would present a rotated token on its second refresh.
+        when(authService.refreshAccessToken(isNull(), any(ClientMeta.class)))
+                .thenThrow(new AppException(ErrorCode.INVALID_CREDENTIALS));
+
+        mockMvc.perform(post("/api/v1/auth/refresh")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"refreshToken\":\"RT\"}"))
+                .andExpect(status().isUnauthorized());
+
+        verify(authService).refreshAccessToken(isNull(), any(ClientMeta.class));
+    }
+
+    private static void assertSessionCookiesExpired(MvcResult result) {
         Rfc6265CookieProcessor tomcat = new Rfc6265CookieProcessor();
         List<String> headers = Arrays.stream(result.getResponse().getCookies())
                 .map(cookie -> tomcat.generateHeader(cookie, null))

@@ -73,6 +73,7 @@ class AuthServicePasswordLoginTest {
         when(passwordEncoder.matches("secret", HASH)).thenReturn(true);
         when(jwtUtil.generateToken(u)).thenReturn("AT");
         when(jwtUtil.generateRefreshToken(u)).thenReturn("RT");
+        when(userRepository.lockById(u.getId())).thenReturn(Optional.of(u));
 
         AuthResponse res = authService.authenticateWithPassword("admin", "secret", META);
 
@@ -89,6 +90,7 @@ class AuthServicePasswordLoginTest {
         when(passwordEncoder.matches("secret", HASH)).thenReturn(true);
         when(jwtUtil.generateToken(u)).thenReturn("AT");
         when(jwtUtil.generateRefreshToken(u)).thenReturn("RT");
+        when(userRepository.lockById(u.getId())).thenReturn(Optional.of(u));
 
         authService.authenticateWithPassword("admin", "secret", META);
 
@@ -138,6 +140,7 @@ class AuthServicePasswordLoginTest {
         when(passwordEncoder.matches("secret", HASH)).thenReturn(true);
         when(jwtUtil.generateToken(u)).thenReturn("AT");
         when(jwtUtil.generateRefreshToken(u)).thenReturn("RT");
+        when(userRepository.lockById(u.getId())).thenReturn(Optional.of(u));
 
         authService.authenticateWithPassword("admin", "secret", META);
 
@@ -154,6 +157,7 @@ class AuthServicePasswordLoginTest {
         when(passwordEncoder.matches("secret", HASH)).thenReturn(true);
         when(jwtUtil.generateToken(u)).thenReturn("AT");
         when(jwtUtil.generateRefreshToken(u)).thenReturn("RT");
+        when(userRepository.lockById(u.getId())).thenReturn(Optional.of(u));
 
         authService.authenticateWithPassword("admin", "secret", META);
 
@@ -161,6 +165,7 @@ class AuthServicePasswordLoginTest {
         order.verify(userRepository).findByUsername("admin");
         order.verify(passwordEncoder).matches("secret", HASH);
         order.verify(transactionManager).getTransaction(any());
+        order.verify(userRepository).lockById(u.getId());
         order.verify(tokenRepository).deleteAllByUserId(u.getId());
         order.verify(tokenRepository, times(2)).save(any());
         order.verify(userRepository).save(u);

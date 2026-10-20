@@ -156,14 +156,23 @@ public class JwtUtil {
                 .map(GrantedAuthority::getAuthority)
                 .sorted()
                 .toList());
-        return buildToken(claims, user, jwtExpiration);
+        return buildToken(claims, user, new Date(System.currentTimeMillis() + jwtExpiration));
     }
 
     public String generateRefreshToken(User userDetails) {
-        return buildToken(new HashMap<>(), userDetails, refreshExpiration);
+        return buildToken(new HashMap<>(), userDetails, new Date(System.currentTimeMillis() + refreshExpiration));
     }
 
-    private String buildToken(Map<String, Object> extractClaims, User user, long expiration) {
+    /**
+     * The successor of a rotated refresh token: it expires one refresh TTL from now or at {@code notAfter} (the
+     * presented token's expiry), whichever is sooner, so a session ends one refresh TTL after its login.
+     */
+    public String generateRefreshToken(User user, Date notAfter) {
+        long expiry = Math.min(System.currentTimeMillis() + refreshExpiration, notAfter.getTime());
+        return buildToken(new HashMap<>(), user, new Date(expiry));
+    }
+
+    private String buildToken(Map<String, Object> extractClaims, User user, Date expiration) {
         return Jwts
                 .builder()
                 .setHeaderParam(JwsHeader.KEY_ID, keyId)
@@ -171,7 +180,7 @@ public class JwtUtil {
                 .setId(UUID.randomUUID().toString())
                 .setSubject(user.getUsername())
                 .setIssuedAt(new Date(System.currentTimeMillis()))
-                .setExpiration(new Date(System.currentTimeMillis() + expiration))
+                .setExpiration(expiration)
                 .signWith(rsaPrivateKey, SignatureAlgorithm.RS256)
                 .compact();
     }
@@ -189,7 +198,7 @@ public class JwtUtil {
         return extractExpiration(token).before(new Date());
     }
 
-    private Date extractExpiration(String token) {
+    public Date extractExpiration(String token) {
         return extractClaims(token, Claims::getExpiration);
     }
 
