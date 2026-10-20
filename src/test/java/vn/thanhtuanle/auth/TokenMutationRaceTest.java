@@ -379,19 +379,23 @@ class TokenMutationRaceTest {
 
     /** The call gives up on the user's row after the 5 s lock timeout with a clean 503, instead of waiting forever. */
     private void assertGivesUpWith503(Callable<?> call, UUID userId) throws Exception {
+        assertGivesUpWith503(call, userId, Duration.ofMillis(4_500), Duration.ofSeconds(9));
+    }
+
+    private void assertGivesUpWith503(Callable<?> call, UUID userId, Duration atLeast, Duration atMost)
+            throws Exception {
         try (Connection holder = holdUserRow(userId)) {
             long start = System.nanoTime();
             Future<?> result = first.submit(call);
             try {
-                assertThatThrownBy(() -> result.get(10, TimeUnit.SECONDS))
+                assertThatThrownBy(() -> result.get(atMost.toSeconds() + 1, TimeUnit.SECONDS))
                         .isInstanceOf(ExecutionException.class)
                         .cause()
                         .isInstanceOfSatisfying(AppException.class, e -> {
                             assertThat(e.getErrorCode()).isEqualTo(ErrorCode.ACCOUNT_BUSY);
                             assertThat(e.getErrorCode().getStatusCode().value()).isEqualTo(503);
                         });
-                assertThat(Duration.ofNanos(System.nanoTime() - start)).isBetween(
-                        Duration.ofMillis(4_500), Duration.ofSeconds(9));
+                assertThat(Duration.ofNanos(System.nanoTime() - start)).isBetween(atLeast, atMost);
             } finally {
                 holder.rollback();
             }
@@ -412,12 +416,37 @@ class TokenMutationRaceTest {
     void aLogoutWaitingTooLongForTheUserRowAnswers503() throws Exception {
         Session session = login();
 
+        // Two waits: it tries once more before giving up.
         assertGivesUpWith503(() -> {
             authService.logout(session.refreshToken());
             return null;
-        }, session.userId());
+        }, session.userId(), Duration.ofMillis(9_500), Duration.ofSeconds(18));
 
         assertThat(rowsOf(session.userId())).containsExactly("ACCESS false", "REFRESH false");
+    }
+
+    /**
+     * A logout whose first wait for the user row gives up (5 s) tries once more, in a fresh transaction: the row is free
+     * by then, and every session ends. The browser's cookies are cleared whatever logout answers, so giving up at once
+     * would leave every other session alive with nothing left to retry from.
+     */
+    @Test
+    void aLogoutWhoseFirstWaitTimesOut_triesOnceMore_andEndsEverySession() throws Exception {
+        Session session = login();
+        Future<?> loggingOut;
+        try (Connection holder = holdUserRow(session.userId())) {
+            loggingOut = first.submit(() -> {
+                logout(session);
+                return null;
+            });
+            awaitLockWaiters(1);
+            // Longer than one lock timeout, shorter than two: the first wait has given up, the second is waiting.
+            Thread.sleep(6_500);
+            holder.rollback();
+        }
+
+        loggingOut.get(10, TimeUnit.SECONDS);
+        assertThat(rowsOf(session.userId())).isEmpty();
     }
 
     @Test

@@ -7,6 +7,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -16,6 +17,8 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import vn.thanhtuanle.common.enums.TokenType;
 import vn.thanhtuanle.common.util.JwtUtil;
 import vn.thanhtuanle.entity.Token;
@@ -50,6 +53,9 @@ class AuthServiceLogoutTest {
     private TokenBlocklist tokenBlocklist;
     @Mock
     private SessionRevoker sessionRevoker;
+    /** The sessions end in a transaction of their own (a mocked manager: no database here). */
+    @Spy
+    private TransactionTemplate transactionTemplate = new TransactionTemplate(mock(PlatformTransactionManager.class));
     @InjectMocks
     private AuthService authService;
 

@@ -639,8 +639,11 @@ public class AuthService {
      * Ends every session of the caller. The caller is found from a verified access token (by its {@code uid}, see
      * {@link Caller}) or, when that has expired (the common case with 15-minute tokens: the request is then anonymous),
      * from the refresh cookie. With neither there is nothing to end, and the caller still clears the cookies.
+     *
+     * <p>Not {@code @Transactional}: the sessions end in a transaction of their own, which is tried once more when the
+     * user's row stays locked past the lock timeout. The caller clears the cookies whatever this answers, so giving up
+     * at once would leave every other session alive with nothing left in the browser to retry from.
      */
-    @Transactional
     public void logout(String refreshToken) {
         log.info("Logout request received");
         Optional<UUID> userId = Optional.empty();
@@ -662,11 +665,23 @@ public class AuthService {
         }
 
         UUID uid = userId.get();
-        userRepository.lockById(uid);
-        tokenRepository.deleteAllByUserId(uid);
-        // Every device's access token, not only the caller's: the gateway strips tokens issued before the cutoff.
-        sessionRevoker.revokeAccessTokensAfterCommit(List.of(uid));
+        try {
+            endEverySession(uid);
+        } catch (UserLockTimeoutException busy) {
+            log.warn("Logout of user {} waited too long for the user's row; trying once more", uid);
+            endEverySession(uid);
+        }
         log.info("User logged out successfully");
+    }
+
+    /** Under the user's row lock, in a transaction of its own: every token row goes, every access token is revoked. */
+    private void endEverySession(UUID uid) {
+        transactionTemplate.executeWithoutResult(status -> {
+            userRepository.lockById(uid);
+            tokenRepository.deleteAllByUserId(uid);
+            // Every device's access token, not only the caller's: the gateway strips tokens issued before the cutoff.
+            sessionRevoker.revokeAccessTokensAfterCommit(List.of(uid));
+        });
     }
 
     public IntrospectResponse introspect(IntrospectRequest request) {
