@@ -1,5 +1,6 @@
 package vn.thanhtuanle.auth;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -7,11 +8,14 @@ import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.redis.RedisConnectionFailureException;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.security.authentication.AnonymousAuthenticationToken;
 import org.springframework.security.core.authority.AuthorityUtils;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import org.springframework.test.util.ReflectionTestUtils;
 import vn.thanhtuanle.common.enums.TokenType;
 import vn.thanhtuanle.common.util.JwtUtil;
 import vn.thanhtuanle.entity.Token;
@@ -27,6 +31,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -146,6 +151,27 @@ class AuthServiceLogoutTest {
         verify(tokenRepository).deleteAllByUserId(userId);
         verify(sessionRevoker).revokeAccessTokensAfterCommit(List.of(userId));
         verifyNoInteractions(tokenBlocklist);
+    }
+
+    @Test
+    void logout_withRedisDown_stillEndsEverySession() {
+        String token = "current.access.token";
+        authenticateAs("alice@example.com", token);
+        UUID userId = UUID.randomUUID();
+        User user = User.builder().username("alice@example.com").build();
+        user.setId(userId);
+        when(userRepository.findByUsername("alice@example.com")).thenReturn(Optional.of(user));
+        when(jwtUtil.extractJti(token)).thenReturn("jti-current");
+        when(jwtUtil.getRemainingTtlMillis(token)).thenReturn(840_000L);
+        StringRedisTemplate redisDown = mock(StringRedisTemplate.class);
+        when(redisDown.opsForValue()).thenThrow(new RedisConnectionFailureException("down"));
+        ReflectionTestUtils.setField(authService, "tokenBlocklist",
+                new TokenBlocklist(redisDown, new SimpleMeterRegistry()));
+
+        authService.logout(null);
+
+        verify(tokenRepository).deleteAllByUserId(userId);
+        verify(sessionRevoker).revokeAccessTokensAfterCommit(List.of(userId));
     }
 
     @Test

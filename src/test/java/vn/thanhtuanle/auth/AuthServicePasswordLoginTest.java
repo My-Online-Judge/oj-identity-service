@@ -250,6 +250,21 @@ class AuthServicePasswordLoginTest {
     }
 
     @Test
+    void aFailingAudit_cannotSkipTheBackoff() {
+        User u = admin(CommonStatus.ACTIVE.getValue(), HASH);
+        when(userRepository.findByUsername("admin")).thenReturn(Optional.of(u));
+        when(passwordEncoder.matches("wrong", HASH)).thenReturn(false);
+        when(loginRateLimiter.recordFailure(ATTEMPT)).thenReturn(Duration.ofSeconds(4));
+        doThrow(new IllegalStateException("audit failed"))
+                .when(loginAttemptService).record("admin", META, false, "USER_NOT_EXISTED");
+
+        assertThatThrownBy(() -> authService.authenticateWithPassword("admin", "wrong", META))
+                .isInstanceOf(RuntimeException.class);
+
+        verify(sleeper).sleep(Duration.ofSeconds(4));
+    }
+
+    @Test
     void aBackoffHandsItsPermitBack() {
         User u = admin(CommonStatus.ACTIVE.getValue(), HASH);
         when(userRepository.findByUsername("admin")).thenReturn(Optional.of(u));

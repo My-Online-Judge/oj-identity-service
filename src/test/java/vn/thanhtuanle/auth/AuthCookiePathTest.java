@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -82,6 +83,16 @@ class AuthCookiePathTest {
                 .andExpect(status().isOk());
 
         verify(authService).logout("RT");
+    }
+
+    @Test
+    void aUsernameLongerThanItsColumnIs400BeforeAnyCheck() throws Exception {
+        mockMvc.perform(post("/api/v1/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"username\":\"" + "u".repeat(65) + "\",\"password\":\"Secret123\"}"))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(authService);
     }
 
     @Test

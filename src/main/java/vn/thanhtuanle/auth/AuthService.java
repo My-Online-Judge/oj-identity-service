@@ -302,8 +302,12 @@ public class AuthService {
             tokens = transactionTemplate.execute(status -> startPasswordSession(user.getId(), verifiedHash, meta));
         } catch (AppException e) {
             Duration backoff = loginRateLimiter.recordFailure(attempt);
-            loginAttemptService.record(username, meta, false, e.getErrorCode().name());
-            backOff(backoff);
+            try {
+                loginAttemptService.record(username, meta, false, e.getErrorCode().name());
+            } finally {
+                // Whatever the audit does, the delay is not skipped.
+                backOff(backoff);
+            }
             throw e;
         }
 

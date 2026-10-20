@@ -6,6 +6,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.UnexpectedRollbackException;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.entity.LoginAttempt;
 
@@ -14,6 +16,7 @@ import java.time.LocalDateTime;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -23,6 +26,7 @@ class LoginAttemptServiceTest {
     private static final ClientMeta META = new ClientMeta("1.2.3.4", "dev-1", "probe/1.0");
 
     @Mock LoginAttemptRepository repository;
+    @Mock PlatformTransactionManager transactionManager;
     @InjectMocks LoginAttemptService service;
 
     @Test
@@ -44,6 +48,30 @@ class LoginAttemptServiceTest {
     void record_neverThrows_evenWhenRepositoryFails() {
         when(repository.save(any())).thenThrow(new RuntimeException("db down"));
         assertThatCode(() -> service.record("alice", META, true, null)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void record_neverThrows_evenWhenItsTransactionCannotCommit() {
+        // A flush failure marks the audit's own transaction rollback-only: the commit then throws.
+        doThrow(new UnexpectedRollbackException("rolled back")).when(transactionManager).commit(any());
+
+        assertThatCode(() -> service.record("alice", META, false, "USER_NOT_EXISTED")).doesNotThrowAnyException();
+    }
+
+    @Test
+    void record_neverThrows_evenWithoutAConnection() {
+        when(transactionManager.getTransaction(any())).thenThrow(new IllegalStateException("pool exhausted"));
+
+        assertThatCode(() -> service.record("alice", META, false, "USER_NOT_EXISTED")).doesNotThrowAnyException();
+    }
+
+    @Test
+    void record_truncatesTheUsernameToItsColumn() {
+        service.record("a".repeat(70), META, false, "GOOGLE_EMAIL_UNVERIFIED");
+
+        ArgumentCaptor<LoginAttempt> captor = ArgumentCaptor.forClass(LoginAttempt.class);
+        verify(repository).save(captor.capture());
+        assertThat(captor.getValue().getUsername()).isEqualTo("a".repeat(64));
     }
 
     @Test

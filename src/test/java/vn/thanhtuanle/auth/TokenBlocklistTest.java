@@ -3,14 +3,22 @@ package vn.thanhtuanle.auth;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.mockito.Mock;
+import org.mockito.Spy;
+import org.springframework.data.redis.RedisConnectionFailureException;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
 import java.time.Duration;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -25,8 +33,22 @@ class TokenBlocklistTest {
     @Mock
     private ValueOperations<String, String> valueOps;
 
+    @Spy
+    private MeterRegistry registry = new SimpleMeterRegistry();
+
     @InjectMocks
     private TokenBlocklist blocklist;
+
+    @Test
+    void block_failsOpen_whenRedisIsDown_andCountsIt() {
+        when(redisTemplate.opsForValue()).thenReturn(valueOps);
+        doThrow(new RedisConnectionFailureException("redis down"))
+                .when(valueOps).set(anyString(), anyString(), any(Duration.class));
+
+        // Logout goes on to delete every session in the database, which needs no Redis.
+        assertThatCode(() -> blocklist.block("jti-123", 900_000L)).doesNotThrowAnyException();
+        assertThat(registry.counter("oj.redis.fallback", "lookup", "logout").count()).isEqualTo(1);
+    }
 
     @Test
     void block_storesJtiKeyWithTtlEqualToRemainingLifetime() {

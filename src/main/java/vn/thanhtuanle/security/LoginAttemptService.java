@@ -1,14 +1,15 @@
 package vn.thanhtuanle.security;
 
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import vn.thanhtuanle.oj.common.web.payload.PageResponse;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.entity.LoginAttempt;
@@ -19,36 +20,46 @@ import java.time.LocalDateTime;
 
 /** Audit log of password/Google login attempts. Refresh-token calls are NOT logged (volume). */
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class LoginAttemptService {
 
     static final int RETENTION_DAYS = 30;
+    /** The length of {@code t_login_attempts.username}. The Google path records the email, up to 254 characters. */
+    static final int USERNAME_MAX = 64;
 
     private final LoginAttemptRepository repository;
+    private final TransactionTemplate audit;
+
+    public LoginAttemptService(LoginAttemptRepository repository, PlatformTransactionManager transactionManager) {
+        this.repository = repository;
+        // REQUIRES_NEW: a caller's transaction that is about to roll back must not take the audit row with it.
+        this.audit = new TransactionTemplate(transactionManager);
+        this.audit.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    }
 
     /**
-     * Never throws — the audit trail must not break login itself.
-     *
-     * <p>REQUIRES_NEW is load-bearing: failed logins are recorded from inside AuthService's
-     * @Transactional method right before the AppException is rethrown, which marks that
-     * transaction rollback-only. Without a fresh transaction the failure row would be
-     * silently rolled back with it (observed live before this annotation existed).
+     * Never throws — the audit trail must not break login itself. The whole transaction runs inside the try: a failed
+     * INSERT surfaces at flush or commit (a failed flush marks the transaction rollback-only, so its commit throws), and
+     * getting the connection can fail too. With {@code @Transactional} on this method those happened in the proxy,
+     * after the catch.
      */
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void record(String username, ClientMeta meta, boolean success, String errorCode) {
         try {
-            repository.save(LoginAttempt.builder()
-                    .username(username)
+            audit.executeWithoutResult(status -> repository.save(LoginAttempt.builder()
+                    .username(truncate(username))
                     .ip(meta.ip())
                     .deviceHash(meta.deviceHash())
                     .userAgent(meta.userAgent())
                     .success(success)
                     .errorCode(errorCode)
-                    .build());
+                    .build()));
         } catch (Exception e) {
-            log.warn("Failed to record login attempt for {}: {}", username, e.getMessage());
+            log.warn("Failed to record login attempt for {}: {}", truncate(username), e.getMessage());
         }
+    }
+
+    private static String truncate(String username) {
+        return username == null || username.length() <= USERNAME_MAX ? username : username.substring(0, USERNAME_MAX);
     }
 
     public PageResponse<AttemptResponse> list(int page, int size, String ip, String username,
