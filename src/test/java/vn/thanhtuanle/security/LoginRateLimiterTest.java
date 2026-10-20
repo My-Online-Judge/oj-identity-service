@@ -98,11 +98,20 @@ class LoginRateLimiterTest {
 
     @Test
     void aReservationReturnsTheCountsOfThisAttempt() {
-        scriptAnswers(List.of(1L, 3L, 12L, 7L));
+        scriptAnswers(List.of(1L, 3L, 12L, 7L, 0L, 0L, 0L));
 
         Attempt attempt = limiter.reserve("alice", META);
 
         assertThat(attempt).isEqualTo(new Attempt("alice", "1.2.3.4", 3, 12, 7));
+    }
+
+    @Test
+    void aReservationThatWentOverALimitIsItsProbe() {
+        scriptAnswers(List.of(1L, 6L, 12L, 7L, 1L, 0L, 0L));
+
+        Attempt attempt = limiter.reserve("alice", META);
+
+        assertThat(attempt).isEqualTo(new Attempt("alice", "1.2.3.4", 6, 12, 7, true, false, false));
     }
 
     @Test
@@ -143,10 +152,12 @@ class LoginRateLimiterTest {
         assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 5, 1, 1))).isEqualTo(Duration.ofSeconds(4));
         assertThatCode(() -> limiter.recordSuccess(new Attempt("alice", "1.2.3.4", 1, 1, 1)))
                 .doesNotThrowAnyException();
+        assertThatCode(() -> limiter.release(new Attempt("alice", "1.2.3.4", 1, 1, 1)))
+                .doesNotThrowAnyException();
         assertThatCode(() -> limiter.assertPasswordChangeAllowed(userId)).doesNotThrowAnyException();
         assertThatCode(() -> limiter.recordPasswordChangeFailure(userId)).doesNotThrowAnyException();
 
-        assertThat(fallbacks()).isEqualTo(5);
+        assertThat(fallbacks()).isEqualTo(6);
     }
 
     @Test

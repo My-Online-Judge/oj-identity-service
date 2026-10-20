@@ -88,7 +88,8 @@ class LoginRateLimiterRedisTest {
         assertThatThrownBy(() -> limiter.reserve(username, from(ip)))
                 .isInstanceOfSatisfying(RateLimitedException.class, e -> {
                     assertThat(e.getErrorCode()).isEqualTo(ErrorCode.RATE_LIMITED);
-                    assertThat(e.getRetryAfterSeconds()).isBetween(1L, LoginRateLimiter.ACCOUNT_WINDOW.toSeconds());
+                    // Only a lock refuses, so Retry-After is never above the lock's 15 minutes.
+                    assertThat(e.getRetryAfterSeconds()).isBetween(1L, LoginRateLimiter.LOCK_SECONDS);
                 });
     }
 
@@ -117,17 +118,21 @@ class LoginRateLimiterRedisTest {
     }
 
     @Test
-    void theSixthAttemptInFlightIsRefusedBeforeItsPasswordIsChecked() {
+    void aBurstGetsThePairLimitPlusOneProbe_thenEveryAttemptIsRefusedBeforeItsPasswordIsChecked() {
         // Five attempts reserved, none answered yet: a burst that all passed one look at the locks.
         for (int i = 1; i <= 5; i++) {
             assertThat(limiter.reserve("alice", from("10.0.0.1")).pairCount()).isEqualTo(i);
         }
+        assertThat(redis.hasKey("oj:rl:lock:pair:alice|10.0.0.1")).isFalse();
+
+        // The sixth goes over the limit: it locks the pair in the same step and is let through as the one probe.
+        assertThat(limiter.reserve("alice", from("10.0.0.1")).pairCount()).isEqualTo(6);
+        assertThat(ttl("oj:rl:lock:pair:alice|10.0.0.1")).isBetween(890L, 900L);
 
         assertThatThrownBy(() -> limiter.reserve("alice", from("10.0.0.1")))
                 .isInstanceOfSatisfying(RateLimitedException.class, e ->
-                        // No lock yet: retry once the pair's window has passed.
-                        assertThat(e.getRetryAfterSeconds()).isBetween(290L, 300L));
-        assertThat(value("oj:rl:login:pair:alice|10.0.0.1")).isEqualTo("5");
+                        assertThat(e.getRetryAfterSeconds()).isBetween(899L, 900L));
+        assertThat(value("oj:rl:login:pair:alice|10.0.0.1")).isEqualTo("6");
     }
 
     @Test
@@ -154,7 +159,7 @@ class LoginRateLimiterRedisTest {
             for (Future<Boolean> result : results) {
                 admitted += result.get(10, TimeUnit.SECONDS) ? 1 : 0;
             }
-            assertThat(admitted).isEqualTo(5);
+            assertThat(admitted).as("the pair's five plus one probe").isEqualTo(6);
         } finally {
             pool.shutdownNow();
         }
@@ -183,11 +188,81 @@ class LoginRateLimiterRedisTest {
         fail("alice", "10.1.0.50");
 
         assertRefused("alice", "10.9.9.9");
-        // Fifty per hour: the account stays refused while its hour lasts, even after the 15-minute lock.
         assertThatThrownBy(() -> limiter.reserve("alice", from("10.9.9.8")))
                 .isInstanceOfSatisfying(RateLimitedException.class, e ->
-                        assertThat(e.getRetryAfterSeconds()).isBetween(3590L, 3600L));
+                        assertThat(e.getRetryAfterSeconds()).isBetween(899L, 900L));
         assertAllowed("bob", "10.9.9.9");
+    }
+
+    /** Fifty failures from 50 addresses, then the account's 15-minute lock runs out (its hour has not). */
+    private void accountLockedThenExpired() {
+        for (int i = 1; i <= 50; i++) {
+            fail("alice", "10.1.0." + i);
+        }
+        assertThat(redis.hasKey("oj:rl:lock:account:alice")).isTrue();
+        redis.delete("oj:rl:lock:account:alice");
+        assertThat(value("oj:rl:login:account:alice")).isEqualTo("50");
+    }
+
+    @Test
+    void afterTheAccountLockExpires_oneProbeIsLetThrough_andLocksAgainForEveryoneElse() {
+        accountLockedThenExpired();
+
+        Attempt probe = limiter.reserve("alice", from("10.9.9.9"));
+
+        assertThat(probe.accountCount()).isEqualTo(51);
+        assertThat(ttl("oj:rl:lock:account:alice")).isBetween(890L, 900L);
+        assertRefused("alice", "10.9.9.8");
+    }
+
+    @Test
+    void aSuccessfulProbe_liftsTheLockItSet() {
+        accountLockedThenExpired();
+        Attempt probe = limiter.reserve("alice", from("10.9.9.9"));
+
+        limiter.recordSuccess(probe);
+
+        // The legitimate user is in, and the account is open again (its earlier failures still count).
+        assertThat(redis.hasKey("oj:rl:lock:account:alice")).isFalse();
+        assertThat(value("oj:rl:login:account:alice")).isEqualTo("50");
+        assertAllowed("alice", "10.9.9.8");
+    }
+
+    @Test
+    void aReleaseHandsBackEveryPlace_thePairsIncluded() {
+        fail("alice", "10.0.0.1", 2);
+        Attempt busy = limiter.reserve("alice", from("10.0.0.1"));
+
+        // Not a verdict on the password (the account was busy, or something broke): not a failure, and no typo
+        // forgiven either.
+        limiter.release(busy);
+
+        assertThat(value("oj:rl:login:pair:alice|10.0.0.1")).isEqualTo("2");
+        assertThat(value("oj:rl:login:account:alice")).isEqualTo("2");
+        assertThat(value("oj:rl:login:ip:10.0.0.1")).isEqualTo("2");
+    }
+
+    @Test
+    void aReleasedProbe_liftsTheLockItSet() {
+        accountLockedThenExpired();
+        Attempt probe = limiter.reserve("alice", from("10.9.9.9"));
+        assertThat(probe.accountProbe()).isTrue();
+        assertThat(probe.pairProbe()).isFalse();
+
+        limiter.release(probe);
+
+        assertThat(redis.hasKey("oj:rl:lock:account:alice")).isFalse();
+        assertThat(value("oj:rl:login:account:alice")).isEqualTo("50");
+    }
+
+    @Test
+    void aWrongProbe_locksForAnotherFifteenMinutes() {
+        accountLockedThenExpired();
+
+        fail("alice", "10.9.9.9");
+
+        assertThat(ttl("oj:rl:lock:account:alice")).isBetween(890L, 900L);
+        assertRefused("alice", "10.9.9.8");
     }
 
     @Test

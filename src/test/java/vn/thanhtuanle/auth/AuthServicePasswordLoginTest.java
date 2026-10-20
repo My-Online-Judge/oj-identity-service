@@ -29,6 +29,7 @@ import vn.thanhtuanle.security.LoginRateLimiter;
 import vn.thanhtuanle.security.LoginRateLimiter.Attempt;
 import org.springframework.test.util.ReflectionTestUtils;
 import vn.thanhtuanle.user.RoleRepository;
+import vn.thanhtuanle.user.UserLockTimeoutException;
 import vn.thanhtuanle.user.UserRepository;
 import vn.thanhtuanle.user.mapper.UserMapper;
 
@@ -246,6 +247,36 @@ class AuthServicePasswordLoginTest {
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USER_NOT_EXISTED));
         verify(loginRateLimiter).recordFailure(ATTEMPT);
+        verifyNoInteractions(sleeper);
+    }
+
+    @Test
+    void aLockTimeout_isNotAFailedAttempt_andHandsItsReservationBack() {
+        User u = admin(CommonStatus.ACTIVE.getValue(), HASH);
+        when(userRepository.findByUsername("admin")).thenReturn(Optional.of(u));
+        when(passwordEncoder.matches("secret", HASH)).thenReturn(true);
+        when(userRepository.lockById(u.getId())).thenThrow(new UserLockTimeoutException(new RuntimeException("55P03")));
+
+        assertThatThrownBy(() -> authService.authenticateWithPassword("admin", "secret", META))
+                .isInstanceOfSatisfying(AppException.class,
+                        e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.ACCOUNT_BUSY));
+
+        verify(loginRateLimiter).release(ATTEMPT);
+        verify(loginRateLimiter, never()).recordFailure(any());
+        verify(loginRateLimiter, never()).recordSuccess(any());
+        verifyNoInteractions(sleeper, loginAttemptService);
+    }
+
+    @Test
+    void anUnexpectedError_handsTheReservationBack() {
+        when(userRepository.findByUsername("admin"))
+                .thenThrow(new org.springframework.dao.DataAccessResourceFailureException("database down"));
+
+        assertThatThrownBy(() -> authService.authenticateWithPassword("admin", "secret", META))
+                .isInstanceOf(org.springframework.dao.DataAccessResourceFailureException.class);
+
+        verify(loginRateLimiter).release(ATTEMPT);
+        verify(loginRateLimiter, never()).recordFailure(any());
         verifyNoInteractions(sleeper);
     }
 

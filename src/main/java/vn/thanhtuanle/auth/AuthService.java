@@ -280,7 +280,8 @@ public class AuthService {
      * bookkeeping; the caller sets the returned tokens as HttpOnly cookies.
      *
      * <p>The attempt takes its place in the limiter's counters before the password is checked, so a burst is refused
-     * at once (429) beyond the pair's five, with no BCrypt.
+     * at once (429) beyond the pair's five and one probe, with no BCrypt. Only a credential outcome counts as a
+     * failure; an attempt that ends without one hands its places back.
      *
      * <p>Deliberately not {@code @Transactional}: a failure sleeps the limiter's backoff (up to 4 s) before
      * answering, and must hold neither a transaction nor a pooled connection meanwhile, or a credential
@@ -301,13 +302,19 @@ public class AuthService {
             }
             String verifiedHash = user.getPassword();
             tokens = transactionTemplate.execute(status -> startPasswordSession(user.getId(), verifiedHash, meta));
-        } catch (AppException e) {
-            Duration backoff = loginRateLimiter.recordFailure(attempt);
-            try {
-                loginAttemptService.record(username, meta, false, e.getErrorCode().name());
-            } finally {
-                // Whatever the audit does, the delay is not skipped.
-                backOff(backoff);
+        } catch (RuntimeException e) {
+            if (isCredentialFailure(e)) {
+                Duration backoff = loginRateLimiter.recordFailure(attempt);
+                try {
+                    loginAttemptService.record(username, meta, false, ((AppException) e).getErrorCode().name());
+                } finally {
+                    // Whatever the audit does, the delay is not skipped.
+                    backOff(backoff);
+                }
+            } else {
+                // No verdict on the password (the account was busy past the lock timeout, or something broke): not a
+                // failed attempt, so it hands its places back.
+                loginRateLimiter.release(attempt);
             }
             throw e;
         }
@@ -317,6 +324,12 @@ public class AuthService {
 
         log.info("Password login for user: {}", username);
         return tokens;
+    }
+
+    /** A wrong password, an unknown user, or a blocked account: the outcomes of checking a credential. */
+    private static boolean isCredentialFailure(RuntimeException e) {
+        return e instanceof AppException app
+                && (app.getErrorCode() == ErrorCode.USER_NOT_EXISTED || app.getErrorCode() == ErrorCode.USER_BLOCKED);
     }
 
     /** Sleeps a failed login's delay, unless {@link #MAX_CONCURRENT_BACKOFFS} others already are. */
