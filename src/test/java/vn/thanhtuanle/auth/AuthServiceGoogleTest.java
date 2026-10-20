@@ -230,8 +230,10 @@ class AuthServiceGoogleTest {
         assertThat(u.getGoogleId()).isEqualTo("google-sub-OTHER");
         verify(userRepository, never()).save(any());
         verifyNoInteractions(tokenRepository, jwtUtil);
-        verify(transactionManager).rollback(any());
-        verify(loginAttemptService).record(EMAIL, META, false, "GOOGLE_ACCOUNT_MISMATCH");
+        // Audited once the transaction has rolled back, i.e. with the user's row lock released.
+        InOrder order = inOrder(transactionManager, loginAttemptService);
+        order.verify(transactionManager).rollback(any());
+        order.verify(loginAttemptService).record(EMAIL, META, false, "GOOGLE_ACCOUNT_MISMATCH");
     }
 
     @Test
@@ -306,6 +308,10 @@ class AuthServiceGoogleTest {
         order.verify(tokenRepository, times(2)).save(any(Token.class));
         order.verify(userRepository).save(u);
         order.verify(transactionManager).commit(any());
+        // The audit's own connection is taken after the commit has released the lock.
+        InOrder audit = inOrder(transactionManager, loginAttemptService);
+        audit.verify(transactionManager).commit(any());
+        audit.verify(loginAttemptService).record(EMAIL, META, true, null);
     }
 
     @Test
@@ -318,7 +324,9 @@ class AuthServiceGoogleTest {
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USER_BLOCKED));
         verifyNoInteractions(tokenRepository, jwtUtil);
-        verify(loginAttemptService).record(EMAIL, META, false, "USER_BLOCKED");
+        InOrder order = inOrder(transactionManager, loginAttemptService);
+        order.verify(transactionManager).rollback(any());
+        order.verify(loginAttemptService).record(EMAIL, META, false, "USER_BLOCKED");
     }
 
     @Test

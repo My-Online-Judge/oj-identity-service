@@ -144,7 +144,8 @@ public class AuthService {
      * account, one is created.
      *
      * <p>Not {@code @Transactional}: the call to Google holds neither a transaction nor a pooled connection. The account
-     * and token writes run in one transaction, under the user's row lock, like every other token change.
+     * and token writes run in one short transaction, under the user's row lock, like every other token change. The
+     * attempt is audited after that transaction ends, so the audit's own connection is never taken under the lock.
      */
     public AuthResponse authenticateGoogleUser(String code, String codeVerifier, String nonce, ClientMeta meta) {
         GoogleIdentity google = googleIdTokenVerifier.verify(exchangeCode(code, codeVerifier), nonce);
@@ -156,7 +157,15 @@ public class AuthService {
         }
 
         Optional<UUID> accountId = userRepository.findByEmail(google.email()).map(User::getId);
-        AuthResponse tokens = transactionTemplate.execute(status -> startGoogleSession(accountId, google, meta));
+        AuthResponse tokens;
+        try {
+            tokens = transactionTemplate.execute(status -> startGoogleSession(accountId, google, meta));
+        } catch (AppException e) {
+            // The transaction has rolled back and released the row lock: the audit (REQUIRES_NEW) waits for a pooled
+            // connection of its own, and must not keep the user locked while it does.
+            loginAttemptService.record(google.email(), meta, false, e.getErrorCode().name());
+            throw e;
+        }
 
         loginAttemptService.record(google.email(), meta, true, null);
         return tokens;
@@ -196,12 +205,11 @@ public class AuthService {
      * the copy read before the transaction.
      */
     private AuthResponse startGoogleSession(Optional<UUID> accountId, GoogleIdentity google, ClientMeta meta) {
-        User user = accountId.isPresent() ? lockedAccount(accountId.get(), google, meta) : newAccount(google);
+        User user = accountId.isPresent() ? lockedAccount(accountId.get(), google) : newAccount(google);
 
         // Only active accounts may log in (disabled/soft-deleted users are blocked).
-        // Audited like the password flow; NOT rate-limited — the OAuth code exchange is its own guard.
+        // Audited like the password flow (by the caller); NOT rate-limited — the OAuth code exchange is its own guard.
         if (user.getStatus() == null || user.getStatus() != CommonStatus.ACTIVE.getValue()) {
-            loginAttemptService.record(user.getEmail(), meta, false, ErrorCode.USER_BLOCKED.name());
             throw new AppException(ErrorCode.USER_BLOCKED);
         }
 
@@ -224,7 +232,7 @@ public class AuthService {
     }
 
     /** The account with the Google email, locked. Linked to another Google id: refused. Linked to none: linked now. */
-    private User lockedAccount(UUID id, GoogleIdentity google, ClientMeta meta) {
+    private User lockedAccount(UUID id, GoogleIdentity google) {
         User user = userRepository.lockById(id).orElseThrow(() -> new AppException(ErrorCode.USER_NOT_EXISTED));
         if (user.getGoogleId() == null) {
             user.setGoogleId(google.sub());
@@ -232,7 +240,6 @@ public class AuthService {
                 user.setAvatar(google.picture());
         } else if (!user.getGoogleId().equals(google.sub())) {
             log.warn("Google login refused: user {} is linked to a different Google account", user.getId());
-            loginAttemptService.record(google.email(), meta, false, ErrorCode.GOOGLE_ACCOUNT_MISMATCH.name());
             throw new AppException(ErrorCode.GOOGLE_ACCOUNT_MISMATCH);
         }
         return user;
