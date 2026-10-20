@@ -78,7 +78,7 @@ class UserServiceMutationTest {
         UUID id = UUID.randomUUID();
         User u = user(id);
         when(userRepository.findById(id)).thenReturn(Optional.of(u));
-        when(userRepository.existsByEmailAndIdNot("bob@example.io", id)).thenReturn(false);
+        when(userRepository.existsLiveByEmailAndIdNot("bob@example.io", id)).thenReturn(false);
 
         userService.update(id, req("Bob", "bob@example.io", null));
 
@@ -91,7 +91,7 @@ class UserServiceMutationTest {
     void update_duplicateEmail_throwsEmailExisted() {
         UUID id = UUID.randomUUID();
         when(userRepository.findById(id)).thenReturn(Optional.of(user(id)));
-        when(userRepository.existsByEmailAndIdNot("dupe@example.io", id)).thenReturn(true);
+        when(userRepository.existsLiveByEmailAndIdNot("dupe@example.io", id)).thenReturn(true);
 
         assertThatThrownBy(() -> userService.update(id, req(null, "dupe@example.io", null)))
                 .isInstanceOfSatisfying(AppException.class,

@@ -48,8 +48,8 @@ class UserServiceCreateTest {
     @Test
     void validCreate_encodesPassword_defaultsActive_savesUser() {
         CreateUserRequest req = validReq();
-        when(userRepository.existsByUsername("newuser")).thenReturn(false);
-        when(userRepository.existsByEmail("new@example.io")).thenReturn(false);
+        when(userRepository.existsLiveByUsername("newuser")).thenReturn(false);
+        when(userRepository.existsLiveByEmail("new@example.io")).thenReturn(false);
         when(passwordEncoder.encode("Passw0rd")).thenReturn("ENC");
 
         userService.create(req);
@@ -77,7 +77,7 @@ class UserServiceCreateTest {
     @Test
     void duplicateUsername_throwsUsernameExisted() {
         CreateUserRequest req = validReq();
-        when(userRepository.existsByUsername("newuser")).thenReturn(true);
+        when(userRepository.existsLiveByUsername("newuser")).thenReturn(true);
         assertThatThrownBy(() -> userService.create(req))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USERNAME_EXISTED));
@@ -88,7 +88,7 @@ class UserServiceCreateTest {
     void invalidEmail_throwsEmailInvalid() {
         CreateUserRequest req = validReq();
         req.setEmail("not-an-email");
-        when(userRepository.existsByUsername("newuser")).thenReturn(false);
+        when(userRepository.existsLiveByUsername("newuser")).thenReturn(false);
         assertThatThrownBy(() -> userService.create(req))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.EMAIL_INVALID));
@@ -98,8 +98,8 @@ class UserServiceCreateTest {
     @Test
     void duplicateEmail_throwsEmailExisted() {
         CreateUserRequest req = validReq();
-        when(userRepository.existsByUsername("newuser")).thenReturn(false);
-        when(userRepository.existsByEmail("new@example.io")).thenReturn(true);
+        when(userRepository.existsLiveByUsername("newuser")).thenReturn(false);
+        when(userRepository.existsLiveByEmail("new@example.io")).thenReturn(true);
         assertThatThrownBy(() -> userService.create(req))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.EMAIL_EXISTED));
@@ -110,8 +110,8 @@ class UserServiceCreateTest {
     void shortPassword_throwsPasswordInvalid() {
         CreateUserRequest req = validReq();
         req.setPassword("short");
-        when(userRepository.existsByUsername("newuser")).thenReturn(false);
-        when(userRepository.existsByEmail("new@example.io")).thenReturn(false);
+        when(userRepository.existsLiveByUsername("newuser")).thenReturn(false);
+        when(userRepository.existsLiveByEmail("new@example.io")).thenReturn(false);
         assertThatThrownBy(() -> userService.create(req))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.PASSWORD_INVALID));
@@ -125,8 +125,8 @@ class UserServiceCreateTest {
         req.setRoleIds(Set.of(sysRootId));
         Role sysRoot = Role.builder().name("SYS_ROOT").build();
         sysRoot.setId(sysRootId);
-        when(userRepository.existsByUsername("newuser")).thenReturn(false);
-        when(userRepository.existsByEmail("new@example.io")).thenReturn(false);
+        when(userRepository.existsLiveByUsername("newuser")).thenReturn(false);
+        when(userRepository.existsLiveByEmail("new@example.io")).thenReturn(false);
         when(roleRepository.findById(sysRootId)).thenReturn(Optional.of(sysRoot));
 
         assertThatThrownBy(() -> userService.create(req))
@@ -140,8 +140,8 @@ class UserServiceCreateTest {
         CreateUserRequest req = validReq();
         UUID roleId = UUID.randomUUID();
         req.setRoleIds(Set.of(roleId));
-        when(userRepository.existsByUsername("newuser")).thenReturn(false);
-        when(userRepository.existsByEmail("new@example.io")).thenReturn(false);
+        when(userRepository.existsLiveByUsername("newuser")).thenReturn(false);
+        when(userRepository.existsLiveByEmail("new@example.io")).thenReturn(false);
         when(roleRepository.findById(roleId)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> userService.create(req))

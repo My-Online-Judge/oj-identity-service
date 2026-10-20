@@ -20,11 +20,20 @@ public interface UserRepository extends JpaRepository<User, UUID>, JpaSpecificat
     @Query("select u from User u where u.username = :username and u.status <> 2")
     Optional<User> findByUsername(@Param("username") String username);
 
-    Boolean existsByUsername(String username);
+    /**
+     * Whether a live account (status not 2, soft-deleted) has this username in any case: the rows identity's V6 unique
+     * index {@code ux_users_username_lower} covers, so the check refuses exactly what the index would.
+     */
+    @Query("select count(u) > 0 from User u where lower(u.username) = lower(:username) and u.status <> 2")
+    boolean existsLiveByUsername(@Param("username") String username);
 
-    Boolean existsByEmail(String email);
+    /** Whether a live account has this email in any case (V6's {@code ux_users_email_lower}). */
+    @Query("select count(u) > 0 from User u where lower(u.email) = lower(:email) and u.status <> 2")
+    boolean existsLiveByEmail(@Param("email") String email);
 
-    boolean existsByEmailAndIdNot(String email, UUID id);
+    /** Whether a live account other than {@code id} has this email in any case (V6's {@code ux_users_email_lower}). */
+    @Query("select count(u) > 0 from User u where lower(u.email) = lower(:email) and u.status <> 2 and u.id <> :id")
+    boolean existsLiveByEmailAndIdNot(@Param("email") String email, @Param("id") UUID id);
 
     /**
      * The live account (status not 2, soft-deleted) with this email, whatever its case: the rows identity's V6 unique

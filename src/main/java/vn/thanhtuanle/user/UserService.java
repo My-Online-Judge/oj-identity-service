@@ -90,14 +90,15 @@ public class UserService {
         if (!USERNAME.matcher(username).matches()) {
             throw new AppException(ErrorCode.USERNAME_INVALID);
         }
-        if (Boolean.TRUE.equals(userRepository.existsByUsername(username))) {
+        // Live accounts only and in any case, like V6's unique indexes: a deleted account's name may be taken again.
+        if (userRepository.existsLiveByUsername(username)) {
             throw new AppException(ErrorCode.USERNAME_EXISTED);
         }
         String email = req.getEmail() == null ? "" : req.getEmail().trim();
         if (!EMAIL.matcher(email).matches()) {
             throw new AppException(ErrorCode.EMAIL_INVALID);
         }
-        if (Boolean.TRUE.equals(userRepository.existsByEmail(email))) {
+        if (userRepository.existsLiveByEmail(email)) {
             throw new AppException(ErrorCode.EMAIL_EXISTED);
         }
         validatePassword(req.getPassword());
@@ -133,7 +134,7 @@ public class UserService {
             if (!EMAIL.matcher(email).matches()) {
                 throw new AppException(ErrorCode.EMAIL_INVALID);
             }
-            if (userRepository.existsByEmailAndIdNot(email, id)) {
+            if (userRepository.existsLiveByEmailAndIdNot(email, id)) {
                 throw new AppException(ErrorCode.EMAIL_EXISTED);
             }
             user.setEmail(email);

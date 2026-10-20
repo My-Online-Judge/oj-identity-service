@@ -52,8 +52,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 /**
  * On identity's real schema (Flyway V1–V6 on Postgres), V6's unique indexes are the last word on usernames and emails:
- * a case variant that the service's own (case-sensitive) checks let through is refused by the index, and the
- * violation answers 409 with the same message as those checks, not a 500.
+ * a case variant is refused (by the service's own checks, which match the indexes, or by an index when a write gets
+ * past them, as a Google sign-in's can) with 409 and the same message either way, not a 500. A soft-deleted account's
+ * username and email may be taken again.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -142,6 +143,24 @@ class UserUniquenessOnPostgresTest {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.message").value("Email already exists"));
         assertThat(userRepository.findById(other.getId()).orElseThrow().getEmail()).isNotEqualToIgnoringCase(email);
+    }
+
+    @Test
+    @WithMockUser(authorities = "user:create")
+    void theUsernameAndEmailOfADeletedAccountCanBeTakenAgain() throws Exception {
+        String username = unique("judy");
+        String email = username + "@example.com";
+        userRepository.save(User.builder().username(username).name(username).email(email).password("{noop}unused")
+                .status(UserStatus.DELETED.getValue()).roles(new HashSet<>()).build());
+        long accounts = userRepository.count();
+
+        mockMvc.perform(post("/api/v1/users").contentType(MediaType.APPLICATION_JSON)
+                        .content(createBody(username, email)))
+                .andExpect(status().is2xxSuccessful());
+        assertThat(userRepository.count()).isEqualTo(accounts + 1);
+        // Its login resolves the new account, not the deleted one.
+        assertThat(userRepository.findByUsername(username)).get()
+                .extracting(User::getStatus).isEqualTo(UserStatus.ACTIVE.getValue());
     }
 
     /**
