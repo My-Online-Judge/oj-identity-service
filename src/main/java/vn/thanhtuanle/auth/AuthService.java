@@ -14,9 +14,9 @@ import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
 
 import jakarta.transaction.Transactional;
+import vn.thanhtuanle.auth.GoogleIdTokenVerifier.GoogleIdentity;
 import vn.thanhtuanle.auth.dto.AuthResponse;
 import vn.thanhtuanle.auth.dto.ExchangeTokenResponse;
-import vn.thanhtuanle.auth.dto.FullUserInfo;
 import vn.thanhtuanle.auth.dto.IntrospectRequest;
 import vn.thanhtuanle.auth.dto.IntrospectResponse;
 import vn.thanhtuanle.common.enums.CommonStatus;
@@ -37,6 +37,9 @@ import vn.thanhtuanle.user.UserRepository;
 import vn.thanhtuanle.user.dto.UserResponse;
 import vn.thanhtuanle.user.mapper.UserMapper;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
@@ -46,7 +49,6 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -75,6 +77,7 @@ public class AuthService {
     private final Clock clock;
     private final Sleeper sleeper;
     private final TransactionTemplate transactionTemplate;
+    private final GoogleIdTokenVerifier googleIdTokenVerifier;
 
     @Value("${application.security.jwt.refresh-token.expiration}")
     private long refreshTokenTtlMillis;
@@ -94,36 +97,76 @@ public class AuthService {
     @Value("${spring.security.oauth2.client.provider.google.token-uri}")
     private String tokenUri;
 
-    @Value("${spring.security.oauth2.client.provider.google.user-info-uri}")
-    private String userInfoUri;
-
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     /**
-     * Build the Google authorization URL together with a fresh, unguessable {@code state}.
-     * The frontend stores the state before redirecting and verifies it on the callback,
-     * which defends the login flow against CSRF / authorization-code injection.
+     * Starts a Google sign-in: the authorization URL plus a fresh {@code state}, PKCE code verifier and nonce. The
+     * caller parks the three in cookies only the callback receives. Scopes are the OIDC identity only; no
+     * {@code access_type=offline}, because nothing here uses a Google refresh token.
      */
-    public Map<String, String> getGoogleAuthUrl() {
-        String state = generateState();
+    public GoogleAuthorization getGoogleAuthUrl() {
+        String state = randomUrlToken();
+        String codeVerifier = randomUrlToken();
+        String nonce = randomUrlToken();
         String url = authorizationUri + "?client_id=" + clientId +
                 "&redirect_uri=" + redirectUri +
-                "&response_type=code&scope=email%20profile%20openid&access_type=offline" +
-                "&state=" + state;
-        return Map.of("url", url, "state", state);
+                "&response_type=code&scope=openid%20email%20profile" +
+                "&state=" + state +
+                "&nonce=" + nonce +
+                "&code_challenge=" + pkceS256Challenge(codeVerifier) +
+                "&code_challenge_method=S256";
+        return new GoogleAuthorization(url, state, codeVerifier, nonce);
     }
 
-    private String generateState() {
+    /** 32 random bytes, base64url without padding: 43 URL-safe characters (also a valid PKCE verifier). */
+    private static String randomUrlToken() {
         byte[] bytes = new byte[32];
         SECURE_RANDOM.nextBytes(bytes);
         return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     }
 
-    @Transactional
-    public AuthResponse authenticateGoogleUser(String code, ClientMeta meta) {
-        // 1. Exchange code for tokens
+    /** RFC 7636 S256: base64url-nopad(SHA-256(ASCII(code_verifier))). */
+    private static String pkceS256Challenge(String codeVerifier) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(codeVerifier.getBytes(StandardCharsets.US_ASCII));
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
+        } catch (NoSuchAlgorithmException e) {
+            // Every Java platform must provide SHA-256 (MessageDigest javadoc).
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * Completes a Google sign-in: exchanges the code (with its PKCE verifier) for Google's id token, which must carry
+     * this attempt's nonce, and signs in the account with that email. An unverified email is refused before any
+     * account is looked at. An account already linked to another Google id is refused; one with none is linked; with no
+     * account, one is created.
+     *
+     * <p>Not {@code @Transactional}: the call to Google holds neither a transaction nor a pooled connection. The account
+     * and token writes run in one transaction, under the user's row lock, like every other token change.
+     */
+    public AuthResponse authenticateGoogleUser(String code, String codeVerifier, String nonce, ClientMeta meta) {
+        GoogleIdentity google = googleIdTokenVerifier.verify(exchangeCode(code, codeVerifier), nonce);
+
+        // Anyone can put any address on a Google account; only a verified one says who owns it.
+        if (!google.emailVerified()) {
+            loginAttemptService.record(google.email(), meta, false, ErrorCode.GOOGLE_EMAIL_UNVERIFIED.name());
+            throw new AppException(ErrorCode.GOOGLE_EMAIL_UNVERIFIED);
+        }
+
+        Optional<UUID> accountId = userRepository.findByEmail(google.email()).map(User::getId);
+        AuthResponse tokens = transactionTemplate.execute(status -> startGoogleSession(accountId, google, meta));
+
+        loginAttemptService.record(google.email(), meta, true, null);
+        return tokens;
+    }
+
+    /** The token request: the authorization code plus the PKCE verifier. Returns Google's id token. */
+    private String exchangeCode(String code, String codeVerifier) {
         MultiValueMap<String, String> params = new LinkedMultiValueMap<>();
         params.add("code", code);
+        params.add("code_verifier", codeVerifier);
         params.add("client_id", clientId);
         params.add("client_secret", clientSecret);
         params.add("redirect_uri", redirectUri);
@@ -132,64 +175,28 @@ public class AuthService {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
 
-        HttpEntity<MultiValueMap<String, String>> request = new HttpEntity<>(params, headers);
-
         ExchangeTokenResponse tokenResponse;
         try {
-            ResponseEntity<ExchangeTokenResponse> response = restTemplate.postForEntity(tokenUri, request,
-                    ExchangeTokenResponse.class);
+            ResponseEntity<ExchangeTokenResponse> response = restTemplate.postForEntity(tokenUri,
+                    new HttpEntity<>(params, headers), ExchangeTokenResponse.class);
             tokenResponse = response.getBody();
         } catch (Exception e) {
             log.error("Failed to exchange token with Google", e);
             throw new AppException(ErrorCode.UNCATEGORIZED_EXCEPTION);
         }
-
-        if (tokenResponse == null || tokenResponse.getAccessToken() == null) {
+        if (tokenResponse == null) {
             throw new AppException(ErrorCode.UNCATEGORIZED_EXCEPTION);
         }
+        return tokenResponse.getIdToken();
+    }
 
-        // 2. Get User Info
-        HttpHeaders userInfoHeaders = new HttpHeaders();
-        userInfoHeaders.setBearerAuth(tokenResponse.getAccessToken());
-        HttpEntity<String> userInfoRequest = new HttpEntity<>(userInfoHeaders);
-
-        FullUserInfo googleUser;
-        try {
-            ResponseEntity<FullUserInfo> userInfoResponse = restTemplate.exchange(userInfoUri, HttpMethod.GET,
-                    userInfoRequest, FullUserInfo.class);
-            googleUser = userInfoResponse.getBody();
-        } catch (Exception e) {
-            log.error("Failed to get user info from Google", e);
-            throw new AppException(ErrorCode.UNCATEGORIZED_EXCEPTION);
-        }
-
-        if (googleUser == null) {
-            throw new AppException(ErrorCode.UNCATEGORIZED_EXCEPTION);
-        }
-
-        // 3. Find or Create User
-        User user = userRepository.findByEmail(googleUser.getEmail()).orElseGet(() -> {
-            var role = roleRepository.findByName(Role.USER.getValue())
-                    .orElseThrow(() -> new AppException(ErrorCode.UNCATEGORIZED_EXCEPTION));
-
-            return userRepository.save(User.builder()
-                    .name(googleUser.getName())
-                    .username(googleUser.getEmail())
-                    .email(googleUser.getEmail())
-                    .avatar(googleUser.getPicture())
-                    .googleId(googleUser.getSub())
-                    .status(CommonStatus.ACTIVE.getValue())
-                    .roles(new HashSet<>(Collections.singletonList(role)))
-                    .build());
-        });
-
-        // Update info if needed
-        if (user.getGoogleId() == null) {
-            user.setGoogleId(googleUser.getSub());
-            if (user.getAvatar() == null)
-                user.setAvatar(googleUser.getPicture());
-            userRepository.save(user);
-        }
+    /**
+     * A Google sign-in's writes: link or create the account, then this login's tokens replace every earlier one. An
+     * existing account is read again under its row lock, so the link decision and the writes see its current row, not
+     * the copy read before the transaction.
+     */
+    private AuthResponse startGoogleSession(Optional<UUID> accountId, GoogleIdentity google, ClientMeta meta) {
+        User user = accountId.isPresent() ? lockedAccount(accountId.get(), google, meta) : newAccount(google);
 
         // Only active accounts may log in (disabled/soft-deleted users are blocked).
         // Audited like the password flow; NOT rate-limited — the OAuth code exchange is its own guard.
@@ -198,13 +205,11 @@ public class AuthService {
             throw new AppException(ErrorCode.USER_BLOCKED);
         }
 
-        // 4. Generate Tokens
-        var jwtToken = jwtUtil.generateToken(user);
-        var refreshToken = jwtUtil.generateRefreshToken(user);
+        String accessToken = jwtUtil.generateToken(user);
+        String refreshToken = jwtUtil.generateRefreshToken(user);
 
-        userRepository.lockById(user.getId());
         revokeAllUserTokens(user);
-        savedUserToken(user, jwtToken, TokenType.ACCESS, meta);
+        savedUserToken(user, accessToken, TokenType.ACCESS, meta);
         savedUserToken(user, refreshToken, TokenType.REFRESH, meta);
 
         user.setLastLogin(LocalDateTime.now());
@@ -212,12 +217,43 @@ public class AuthService {
         user.setLastLoginDeviceHash(meta.deviceHash());
         userRepository.save(user);
 
-        loginAttemptService.record(user.getEmail(), meta, true, null);
-
         return AuthResponse.builder()
-                .accessToken(jwtToken)
+                .accessToken(accessToken)
                 .refreshToken(refreshToken)
                 .build();
+    }
+
+    /** The account with the Google email, locked. Linked to another Google id: refused. Linked to none: linked now. */
+    private User lockedAccount(UUID id, GoogleIdentity google, ClientMeta meta) {
+        User user = userRepository.lockById(id).orElseThrow(() -> new AppException(ErrorCode.USER_NOT_EXISTED));
+        if (user.getGoogleId() == null) {
+            user.setGoogleId(google.sub());
+            if (user.getAvatar() == null)
+                user.setAvatar(google.picture());
+        } else if (!user.getGoogleId().equals(google.sub())) {
+            log.warn("Google login refused: user {} is linked to a different Google account", user.getId());
+            loginAttemptService.record(google.email(), meta, false, ErrorCode.GOOGLE_ACCOUNT_MISMATCH.name());
+            throw new AppException(ErrorCode.GOOGLE_ACCOUNT_MISMATCH);
+        }
+        return user;
+    }
+
+    private User newAccount(GoogleIdentity google) {
+        var role = roleRepository.findByName(Role.USER.getValue())
+                .orElseThrow(() -> new AppException(ErrorCode.UNCATEGORIZED_EXCEPTION));
+        User user = userRepository.save(User.builder()
+                .name(google.name())
+                .username(google.email())
+                .email(google.email())
+                .avatar(google.picture())
+                .googleId(google.sub())
+                .status(CommonStatus.ACTIVE.getValue())
+                .roles(new HashSet<>(Collections.singletonList(role)))
+                .build());
+        // No other transaction can see the row before this one commits, but its tokens follow the same rule as
+        // everyone's: written under the user's row lock.
+        userRepository.lockById(user.getId());
+        return user;
     }
 
     /**

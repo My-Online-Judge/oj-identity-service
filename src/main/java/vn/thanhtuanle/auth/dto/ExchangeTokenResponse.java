@@ -21,4 +21,6 @@ public class ExchangeTokenResponse {
     String refreshToken;
     String scope;
     String tokenType;
+    /** Google's {@code id_token} (snake case, like the others): the identity of the user who signed in. */
+    String idToken;
 }

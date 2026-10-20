@@ -26,7 +26,6 @@ spring:
           google:
             authorization-uri: ${GOOGLE_AUTH_URI}
             token-uri: ${GOOGLE_TOKEN_URI}
-            user-info-uri: ${GOOGLE_USER_INFO_URI}
 
 server:
   port: 8000
