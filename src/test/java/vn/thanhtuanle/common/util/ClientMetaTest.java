@@ -15,13 +15,24 @@ class ClientMetaTest {
         when(req.getHeader("X-Device-Id")).thenReturn(deviceId);
         when(req.getHeader("User-Agent")).thenReturn(userAgent);
         when(req.getRemoteAddr()).thenReturn(remoteAddr);
+        when(req.getAttribute("jakarta.servlet.request.X509Certificate"))
+                .thenReturn(gatewayChain());
         return req;
+    }
+
+    private static java.security.cert.X509Certificate[] gatewayChain() {
+        try {
+            return new java.security.cert.X509Certificate[] {ClientIpResolverTest.cert("api-gateway.crt")};
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     @Test
     void resolve_prefersFirstHopOfXForwardedFor() {
         HttpServletRequest req = mock(HttpServletRequest.class);
         when(req.getHeader("X-Forwarded-For")).thenReturn("1.2.3.4, 10.0.0.1");
+        when(req.getAttribute("jakarta.servlet.request.X509Certificate")).thenReturn(gatewayChain());
         assertThat(ClientIpResolver.resolve(req)).isEqualTo("1.2.3.4");
     }
 

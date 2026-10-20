@@ -11,7 +11,6 @@ import org.springframework.security.config.annotation.web.configurers.AbstractHt
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.web.SecurityFilterChain;
-import org.springframework.security.config.annotation.web.configurers.HeadersConfigurer;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -32,7 +31,6 @@ public class SecurityConfig {
     private final OjAccessDeniedHandler accessDeniedHandler;
     private static final String[] WHITE_LIST = {
             "/api/v1/auth/**",
-            "/h2-console/**",
             "/swagger-ui/**",
             "/v3/api-docs/**",
             // Observability endpoints for Prometheus scrape + ops (T5-11). Metric/health data
@@ -53,10 +51,9 @@ public class SecurityConfig {
                 // Emitting it here as well would give the browser a duplicate
                 // Access-Control-Allow-Origin, which it rejects.
                 .cors(AbstractHttpConfigurer::disable)
-                .headers(headers -> headers
-                        .frameOptions(HeadersConfigurer.FrameOptionsConfig::disable))
                 .csrf(AbstractHttpConfigurer::disable)
                 .authorizeHttpRequests(auth -> auth
+                        .requestMatchers("/api/v1/auth/me").authenticated()
                         .requestMatchers(WHITE_LIST).permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(exception -> exception
