@@ -10,6 +10,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import vn.thanhtuanle.auth.SessionRevoker;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.entity.Role;
@@ -92,6 +94,24 @@ class UserServiceChangePasswordTest {
         order.verify(tokenRepository).deleteAllByUserId(id);
         verify(sessionRevoker).revokeAccessTokensAfterCommit(List.of(id));
         verify(gauge).refresh();
+    }
+
+    @Test
+    void theDefaultAdminGaugeRefreshesOnlyAfterCommit() {
+        // Its BCrypt check (~100 ms) must not run while the user's row is locked.
+        signedIn("USER");
+        when(passwordEncoder.matches("OldPass12", "HASH")).thenReturn(true);
+        when(passwordEncoder.encode("NewPass12")).thenReturn("NEW");
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            userService.changeOwnPassword("OldPass12", "NewPass12");
+
+            verify(gauge, never()).refresh();
+            TransactionSynchronizationManager.getSynchronizations().forEach(TransactionSynchronization::afterCommit);
+            verify(gauge).refresh();
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
     }
 
     @Test

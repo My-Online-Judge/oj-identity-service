@@ -82,8 +82,7 @@ class AuthServiceRefreshTest {
         stored.setId(storedId);
         when(jwtUtil.isTokenExpired(refreshToken)).thenReturn(false);
         when(tokenRepository.findByToken(TokenHasher.sha256Hex(refreshToken))).thenReturn(Optional.of(stored));
-        when(jwtUtil.extractUsername(refreshToken)).thenReturn("alice@example.com");
-        when(userRepository.findByUsername("alice@example.com")).thenReturn(Optional.of(user));
+        when(userRepository.lockById(userId)).thenReturn(Optional.of(user));
         return user;
     }
 
@@ -182,17 +181,31 @@ class AuthServiceRefreshTest {
     }
 
     @Test
+    void refresh_gatesAndMintsWithTheRowItLocked() {
+        UUID userId = UUID.randomUUID();
+        User locked = arrangeValidRefresh("valid.refresh.token", userId);
+
+        authService.refreshAccessToken("valid.refresh.token", META);
+
+        // No second read by the token's subject: the status checked is the one read under the lock.
+        verify(userRepository, never()).findByUsername(any());
+        verify(jwtUtil).generateToken(locked);
+    }
+
+    @Test
     void refresh_blockedUser_isRejected_andMintsNoNewToken() {
         UUID userId = UUID.randomUUID();
         String refreshToken = "valid.refresh.token";
+        // The token row's user was read before the lock; the account was disabled meanwhile.
+        User before = User.builder().username("alice@example.com").status(CommonStatus.ACTIVE.getValue()).build();
+        before.setId(userId);
         User user = User.builder().username("alice@example.com").status(CommonStatus.INACTIVE.getValue()).build();
         user.setId(userId);
         Token stored = Token.builder().token(TokenHasher.sha256Hex(refreshToken)).tokenType(TokenType.REFRESH)
-                .user(user).build();
+                .user(before).build();
         when(jwtUtil.isTokenExpired(refreshToken)).thenReturn(false);
         when(tokenRepository.findByToken(TokenHasher.sha256Hex(refreshToken))).thenReturn(Optional.of(stored));
-        when(jwtUtil.extractUsername(refreshToken)).thenReturn("alice@example.com");
-        when(userRepository.findByUsername("alice@example.com")).thenReturn(Optional.of(user));
+        when(userRepository.lockById(userId)).thenReturn(Optional.of(user));
 
         // A disabled/blocked account must be refused exactly like authenticateWithPassword
         // refuses it — the refresh path must not become a silent way to keep renewing a

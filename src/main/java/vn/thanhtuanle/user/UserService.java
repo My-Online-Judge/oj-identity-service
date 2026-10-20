@@ -10,6 +10,8 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import vn.thanhtuanle.auth.SessionRevoker;
 import vn.thanhtuanle.common.enums.UserStatus;
 import vn.thanhtuanle.oj.common.web.error.AppException;
@@ -205,7 +207,21 @@ public class UserService {
         userRepository.lockById(userId);
         tokenRepository.deleteAllByUserId(userId);
         sessionRevoker.revokeAccessTokensAfterCommit(List.of(userId));
-        defaultAdminPasswordGauge.refresh();
+        // A BCrypt check (~100 ms): after the commit, not while the user's row is locked.
+        afterCommit(defaultAdminPasswordGauge::refresh);
+    }
+
+    private static void afterCommit(Runnable action) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    action.run();
+                }
+            });
+        } else {
+            action.run();
+        }
     }
 
     @Transactional

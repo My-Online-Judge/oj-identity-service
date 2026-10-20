@@ -43,7 +43,10 @@ import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.UUID;
+import java.time.Duration;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -318,6 +321,60 @@ class TokenMutationRaceTest {
                 .claim("email", email)
                 .claim("email_verified", true)
                 .build()).serialize();
+    }
+
+    /** Locks the user's row from a connection of the test's own, as a slow writer would hold it. */
+    private Connection holdUserRow(UUID userId) throws Exception {
+        Connection holder = connect();
+        holder.setAutoCommit(false);
+        try (PreparedStatement lock = holder.prepareStatement("select id from t_users where id = ? for update")) {
+            lock.setObject(1, userId);
+            lock.executeQuery().close();
+        }
+        return holder;
+    }
+
+    /** The call gives up on the user's row after the 5 s lock timeout with a clean 503, instead of waiting forever. */
+    private void assertGivesUpWith503(Callable<?> call, UUID userId) throws Exception {
+        try (Connection holder = holdUserRow(userId)) {
+            long start = System.nanoTime();
+            Future<?> result = first.submit(call);
+            try {
+                assertThatThrownBy(() -> result.get(10, TimeUnit.SECONDS))
+                        .isInstanceOf(ExecutionException.class)
+                        .cause()
+                        .isInstanceOfSatisfying(AppException.class, e -> {
+                            assertThat(e.getErrorCode()).isEqualTo(ErrorCode.ACCOUNT_BUSY);
+                            assertThat(e.getErrorCode().getStatusCode().value()).isEqualTo(503);
+                        });
+                assertThat(Duration.ofNanos(System.nanoTime() - start)).isBetween(
+                        Duration.ofMillis(4_500), Duration.ofSeconds(9));
+            } finally {
+                holder.rollback();
+            }
+        }
+    }
+
+    @Test
+    void aRefreshWaitingTooLongForTheUserRowAnswers503_andRotatesNothing() throws Exception {
+        Session session = login();
+
+        // The hardest caller: its dontRollbackOn would otherwise try to commit the failed transaction.
+        assertGivesUpWith503(() -> authService.refreshAccessToken(session.refreshToken(), META), session.userId());
+
+        assertThat(rowsOf(session.userId())).containsExactly("ACCESS false", "REFRESH false");
+    }
+
+    @Test
+    void aLogoutWaitingTooLongForTheUserRowAnswers503() throws Exception {
+        Session session = login();
+
+        assertGivesUpWith503(() -> {
+            authService.logout(session.refreshToken());
+            return null;
+        }, session.userId());
+
+        assertThat(rowsOf(session.userId())).containsExactly("ACCESS false", "REFRESH false");
     }
 
     /** A logout whose access token has expired: the refresh cookie names the session. */

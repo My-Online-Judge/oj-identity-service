@@ -41,6 +41,7 @@ public enum ErrorCode implements ErrorCodeSpec {
     BAN_SELF("You cannot ban your own current IP or device", HttpStatus.CONFLICT),
     BAN_INVALID("Ban type must be IP or DEVICE and value must not be blank", HttpStatus.BAD_REQUEST),
     BAN_NOT_FOUND("Ban not found", HttpStatus.NOT_FOUND),
+    ACCOUNT_BUSY("This account is busy. Try again in a moment", HttpStatus.SERVICE_UNAVAILABLE),
     UNCATEGORIZED_EXCEPTION("Uncategorized error", HttpStatus.INTERNAL_SERVER_ERROR);
 
     private final String message;

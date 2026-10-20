@@ -33,6 +33,7 @@ import vn.thanhtuanle.entity.Token;
 import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.repository.TokenRepository;
 import vn.thanhtuanle.user.RoleRepository;
+import vn.thanhtuanle.user.UserLockTimeoutException;
 import vn.thanhtuanle.user.UserRepository;
 import vn.thanhtuanle.user.dto.UserResponse;
 import vn.thanhtuanle.user.mapper.UserMapper;
@@ -394,8 +395,10 @@ public class AuthService {
      * <p>{@code dontRollbackOn}: only the reuse branch relies on it, so that its deletes commit even though the
      * request answers 401. It applies to every AppException, though: one thrown after {@code markRotated} would commit
      * a rotation with no successor and sign the user out. Nothing after {@code markRotated} may throw one.
+     * {@code rollbackOn} takes the lock timeout back out of it (the more specific rule wins): that transaction has
+     * already failed in Postgres and cannot commit.
      */
-    @Transactional(dontRollbackOn = AppException.class)
+    @Transactional(dontRollbackOn = AppException.class, rollbackOn = UserLockTimeoutException.class)
     public AuthResponse refreshAccessToken(String refreshToken, ClientMeta meta) {
         if (refreshToken == null || refreshToken.isBlank()) {
             throw new AppException(ErrorCode.INVALID_CREDENTIALS);
@@ -416,24 +419,22 @@ public class AuthService {
             throw new AppException(ErrorCode.INVALID_CREDENTIALS);
         }
         // Serialise with every other token change of this user. A concurrent refresh that won meanwhile leaves this
-        // one's markRotated at 0 below; a logout that won leaves no row for it to rotate.
-        userRepository.lockById(stored.getUser().getId());
+        // one's markRotated at 0 below; a logout that won leaves no row for it to rotate. The status gate and the
+        // minting use this row, read under the lock.
+        User user = userRepository.lockById(stored.getUser().getId())
+                .orElseThrow(() -> new AppException(ErrorCode.USER_NOT_EXISTED));
 
         LocalDateTime now = LocalDateTime.now(clock);
         if (stored.getRotatedAt() != null) {
             if (!now.isAfter(stored.getRotatedAt().plus(REUSE_GRACE))) {
                 return AuthResponse.builder().build();
             }
-            UUID uid = stored.getUser().getId();
+            UUID uid = user.getId();
             tokenRepository.deleteAllByUserId(uid);
             sessionRevoker.revokeAccessTokensAfterCommit(List.of(uid));
             log.warn("Refresh token reuse for user {}: every session ended", uid);
             throw new AppException(ErrorCode.REFRESH_TOKEN_REUSED);
         }
-
-        String username = jwtUtil.extractUsername(refreshToken);
-        User user = userRepository.findByUsername(username)
-                .orElseThrow(() -> new AppException(ErrorCode.USER_NOT_EXISTED));
 
         // Same account-status gate as authenticateWithPassword: a disabled/blocked account
         // must not be able to keep renewing its access token via refresh.
@@ -458,7 +459,7 @@ public class AuthService {
         savedUserToken(user, newRefreshToken, TokenType.REFRESH, meta);
         // A rotated row is kept only to recognise reuse, which is moot once the token it held has expired.
         tokenRepository.deleteRotatedBefore(user.getId(), now.minus(Duration.ofMillis(refreshTokenTtlMillis)));
-        log.info("Rotated the refresh token for user: {}", username);
+        log.info("Rotated the refresh token for user: {}", user.getUsername());
 
         return AuthResponse.builder()
                 .accessToken(newAccessToken)
