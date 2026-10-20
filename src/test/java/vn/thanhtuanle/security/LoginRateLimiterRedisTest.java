@@ -134,7 +134,8 @@ class LoginRateLimiterRedisTest {
         // The sixth goes over the limit: it locks the pair in the same step and is let through as the one probe.
         Attempt probe = limiter.reserve("alice", from("10.0.0.1"));
         assertThat(probe.pairCount()).isEqualTo(6);
-        assertThat(ttl("oj:rl:lock:pair:alice|10.0.0.1")).isBetween(890L, 900L);
+        // A probe's lock only outlives the probe if identity dies mid-probe, so it lasts 60 s, not 15 minutes.
+        assertThat(ttl("oj:rl:lock:pair:alice|10.0.0.1")).isBetween(50L, 60L);
         assertThat(value("oj:rl:lock:pair:alice|10.0.0.1")).startsWith("probe:").isEqualTo(probe.probeToken());
 
         // Refused while the probe is in flight: it usually settles within a second, so "retry in 2 s", not 15 min.
@@ -152,6 +153,24 @@ class LoginRateLimiterRedisTest {
         assertThat(limiter.reserve("student30", from("10.0.0.1")).ipProbe()).isTrue();
 
         assertRetryAfter("student31", "10.0.0.1", 2, 2);
+    }
+
+    @Test
+    void aProbeLock_expiresAfterSixtySeconds_butAFailedProbeLeavesAFifteenMinuteFailLock() {
+        for (int i = 1; i <= 5; i++) {
+            limiter.reserve("alice", from("10.0.0.1"));
+        }
+        Attempt probe = limiter.reserve("alice", from("10.0.0.1"));
+        assertThat(probe.pairProbe()).isTrue();
+        assertThat(ttl("oj:rl:lock:pair:alice|10.0.0.1")).isLessThanOrEqualTo(60L);
+        assertRetryAfter("alice", "10.0.0.1", 2, 2);
+
+        // The probe's password is wrong: its lock becomes a failure's, for the full 15 minutes.
+        limiter.recordFailure(probe);
+
+        assertThat(value("oj:rl:lock:pair:alice|10.0.0.1")).startsWith("fail:");
+        assertThat(ttl("oj:rl:lock:pair:alice|10.0.0.1")).isBetween(890L, 900L);
+        assertRetryAfter("alice", "10.0.0.1", 899, 900);
     }
 
     @Test
@@ -258,7 +277,7 @@ class LoginRateLimiterRedisTest {
         Attempt probe = limiter.reserve("alice", from("10.9.9.9"));
 
         assertThat(probe.accountCount()).isEqualTo(51);
-        assertThat(ttl("oj:rl:lock:account:alice")).isBetween(890L, 900L);
+        assertThat(ttl("oj:rl:lock:account:alice")).isBetween(50L, 60L);
         assertRefused("alice", "10.9.9.8");
     }
 

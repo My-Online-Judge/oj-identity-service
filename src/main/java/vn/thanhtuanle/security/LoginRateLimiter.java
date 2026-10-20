@@ -26,7 +26,8 @@ import java.util.concurrent.TimeUnit;
  * <ul>
  *   <li>a lock in force ({@code oj:rl:lock:} + the same suffix) refuses it with 429 and no password check;</li>
  *   <li>otherwise it is counted. The one that goes over a limit (5 per pair, 50 per account, 30 per IP) locks that key
- *       for 15 minutes in the same step and is let through as the single probe; everything after it is refused.</li>
+ *       in the same step (for {@link #PROBE_LOCK_TTL} 60 s, until its failure makes it 15 minutes) and is let
+ *       through as the single probe; everything after it is refused.</li>
  * </ul>
  * A failure keeps its places, and the failure that reaches a limit locks it ({@link #recordFailure}). A success hands
  * its places back, forgives its pair and lifts a lock it set as the probe ({@link #recordSuccess}). So a burst gets at
@@ -65,23 +66,30 @@ public class LoginRateLimiter {
     /** The value prefixes of a lock set by the probe and by a failure (the RESERVE script reads the probe's). */
     static final String PROBE_LOCK = "probe:";
     static final String FAIL_LOCK = "fail:";
+    /**
+     * How long a probe's lock lasts. It outlives its probe only if identity dies mid-probe (a failed probe overwrites
+     * it with a {@link #LOCK 15-minute} failure lock, a settled one deletes it), and clients refused meanwhile are told
+     * to retry in {@link #PROBE_RETRY}, so it must not hold the key for 15 minutes.
+     */
+    static final Duration PROBE_LOCK_TTL = Duration.ofSeconds(60);
     /** A lock's length, so the longest Retry-After: a refusal answers what is left of the locks refusing it. */
     public static final long LOCK_SECONDS = LOCK.toSeconds();
 
     /**
-     * KEYS: lock_1, counter_1, lock_2, counter_2, …  ARGV: limit_1, window_ms_1, limit_2, window_ms_2, …, then lock_ms,
-     * this attempt's probe token ({@code probe:<random>}) and the probe's retry in ms.
+     * KEYS: lock_1, counter_1, lock_2, counter_2, …  ARGV: limit_1, window_ms_1, limit_2, window_ms_2, …, then
+     * this attempt's probe token ({@code probe:<random>}), the probe's retry in ms and its lock's length in ms.
      * Refused when a lock exists: {0, the longest wait among them}, where a failure's lock (any value not starting with
      * {@code probe:}) waits its PTTL and a probe's the probe retry. Otherwise every counter is incremented (its window
-     * starts with its first attempt), and one that goes over its limit locks its key with the probe token: this attempt
-     * is the probe. Returns {1, count_1, …, count_n, probe_1, …, probe_n}.
+     * starts with its first attempt), and one that goes over its limit locks its key with the probe token for the
+     * probe's lock length (a failure sets the long lock): this attempt is
+     * the probe. Returns {1, count_1, …, count_n, probe_1, …, probe_n}.
      */
     @SuppressWarnings("rawtypes")
     private static final RedisScript<List> RESERVE = RedisScript.of("""
             local dimensions = #KEYS / 2
-            local lockMs = ARGV[2 * dimensions + 1]
-            local probeToken = ARGV[2 * dimensions + 2]
-            local probeRetryMs = tonumber(ARGV[2 * dimensions + 3])
+            local probeToken = ARGV[2 * dimensions + 1]
+            local probeRetryMs = tonumber(ARGV[2 * dimensions + 2])
+            local probeLockMs = ARGV[2 * dimensions + 3]
             local refused, retry = false, 0
             for i = 1, dimensions do
               local lock = KEYS[2 * i - 1]
@@ -108,7 +116,7 @@ public class LoginRateLimiter {
               result[1 + i] = count
               result[1 + dimensions + i] = 0
               if count > tonumber(ARGV[2 * i - 1]) then
-                redis.call('SET', KEYS[2 * i - 1], probeToken, 'PX', lockMs)
+                redis.call('SET', KEYS[2 * i - 1], probeToken, 'PX', probeLockMs)
                 result[1 + dimensions + i] = 1
               end
             end
@@ -204,9 +212,9 @@ public class LoginRateLimiter {
             args.add(String.valueOf(d.window().toMillis()));
         }
         String probeToken = PROBE_LOCK + UUID.randomUUID();
-        args.add(String.valueOf(LOCK.toMillis()));
         args.add(probeToken);
         args.add(String.valueOf(PROBE_RETRY.toMillis()));
+        args.add(String.valueOf(PROBE_LOCK_TTL.toMillis()));
         List<Long> result;
         try {
             result = redis.execute(RESERVE, keys, args.toArray());
