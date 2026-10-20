@@ -14,6 +14,7 @@ import vn.thanhtuanle.common.enums.BanType;
 import vn.thanhtuanle.oj.common.web.error.AppException;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.oj.common.web.payload.PageResponse;
+import vn.thanhtuanle.oj.common.web.payload.PageSizes;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.entity.AccessBan;
 import vn.thanhtuanle.security.dto.BanResponse;
@@ -56,7 +57,7 @@ public class AccessBanService {
 
     public PageResponse<BanResponse> list(int page, int size) {
         Page<BanResponse> dtoPage = repository
-                .findAll(PageRequest.of(page, size, Sort.by("createdAt").descending()))
+                .findAll(PageRequest.of(page, PageSizes.cap(size), Sort.by("createdAt").descending()))
                 .map(AccessBanService::toResponse);
         return PageResponse.of(dtoPage);
     }

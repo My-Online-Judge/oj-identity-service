@@ -11,6 +11,7 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 import vn.thanhtuanle.oj.common.web.payload.PageResponse;
+import vn.thanhtuanle.oj.common.web.payload.PageSizes;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.entity.LoginAttempt;
 import vn.thanhtuanle.security.dto.AttemptResponse;
@@ -66,7 +67,7 @@ public class LoginAttemptService {
                                               Boolean success, LocalDate createdFrom, LocalDate createdTo) {
         Page<AttemptResponse> dtoPage = repository
                 .findAll(LoginAttemptSpecifications.filter(ip, username, success, createdFrom, createdTo),
-                        PageRequest.of(page, size, Sort.by("createdAt").descending()))
+                        PageRequest.of(page, PageSizes.cap(size), Sort.by("createdAt").descending()))
                 .map(a -> AttemptResponse.builder()
                         .id(a.getId()).username(a.getUsername()).ip(a.getIp())
                         .deviceHash(a.getDeviceHash()).userAgent(a.getUserAgent())

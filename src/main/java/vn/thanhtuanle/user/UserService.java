@@ -17,6 +17,7 @@ import vn.thanhtuanle.common.enums.UserStatus;
 import vn.thanhtuanle.oj.common.web.error.AppException;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.oj.common.web.payload.PageResponse;
+import vn.thanhtuanle.oj.common.web.payload.PageSizes;
 import vn.thanhtuanle.entity.Role;
 import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.repository.TokenRepository;
@@ -68,7 +69,7 @@ public class UserService {
 
     public PageResponse<UserResponse> list(int page, int size, String search, Integer status, UUID roleId,
             LocalDate createdFrom, LocalDate createdTo) {
-        Pageable pageable = PageRequest.of(page, size, Sort.by("createdAt").descending());
+        Pageable pageable = PageRequest.of(page, PageSizes.cap(size), Sort.by("createdAt").descending());
         Page<UserResponse> dtoPage = userRepository
                 .findAll(UserSpecifications.filter(search, status, roleId, createdFrom, createdTo), pageable)
                 .map(userMapper::toResponse);
