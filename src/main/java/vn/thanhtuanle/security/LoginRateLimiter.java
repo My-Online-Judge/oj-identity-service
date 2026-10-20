@@ -287,7 +287,10 @@ public class LoginRateLimiter {
         try {
             lockAtLimit(pair(attempt.username(), attempt.ip()), attempt.pairCount(), PAIR_LIMIT, failToken);
             lockAtLimit(account(attempt.username()), attempt.accountCount(), accountLimit, failToken);
-            countIpFailure(attempt.ip(), failToken);
+            String address = ip(attempt.ip());
+            if (address != null) {
+                countFailure(address, ipLimit, failToken);
+            }
         } catch (Exception e) {
             failOpen("lock not set", e);
         }
@@ -361,18 +364,13 @@ public class LoginRateLimiter {
         }
     }
 
-    /** Counts a wrong current password; the fifth within the window locks password changes for 15 minutes. */
+    /**
+     * Counts a wrong current password; the fifth within the window locks password changes for 15 minutes. One atomic
+     * step, so the counter never lives on without its window.
+     */
     public void recordPasswordChangeFailure(UUID userId) {
         try {
-            String suffix = passwordChange(userId);
-            String key = COUNT_PREFIX + suffix;
-            Long count = redis.opsForValue().increment(key);
-            if (count != null && count == 1L) {
-                redis.expire(key, WINDOW);
-            }
-            if (count != null && count >= PASSWORD_CHANGE_LIMIT) {
-                redis.opsForValue().set(LOCK_PREFIX + suffix, "1", LOCK);
-            }
+            countFailure(passwordChange(userId), PASSWORD_CHANGE_LIMIT, FAIL_LOCK + UUID.randomUUID());
         } catch (Exception e) {
             failOpen("password change failure not counted", e);
         }
@@ -389,13 +387,10 @@ public class LoginRateLimiter {
         }
     }
 
-    /** Counts a failed password check for its address; the one that reaches the IP limit locks the address. */
-    private void countIpFailure(String ip, String failToken) {
-        String suffix = ip(ip);
-        if (suffix != null) {
-            redis.execute(COUNT_FAILURE, List.of(COUNT_PREFIX + suffix, LOCK_PREFIX + suffix), String.valueOf(ipLimit),
-                    String.valueOf(WINDOW.toMillis()), failToken, String.valueOf(LOCK.toMillis()));
-        }
+    /** Counts one failure for this key in a {@link #WINDOW}; the one that reaches the limit locks the key. */
+    private void countFailure(String suffix, int limit, String failToken) {
+        redis.execute(COUNT_FAILURE, List.of(COUNT_PREFIX + suffix, LOCK_PREFIX + suffix), String.valueOf(limit),
+                String.valueOf(WINDOW.toMillis()), failToken, String.valueOf(LOCK.toMillis()));
     }
 
     /** Whole seconds, rounded up, never below 1: a client told 0 would retry at once. */

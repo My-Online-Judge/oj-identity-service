@@ -115,6 +115,29 @@ class LoginRateLimiterTest {
         assertThat(args.getValue()[3]).isEqualTo("900000");
     }
 
+    /**
+     * A wrong current password is counted, its window started and the lock set at the limit in one atomic step: with
+     * INCR and EXPIRE as two calls, a crash between them would leave a counter that never expires.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void aWrongCurrentPasswordIsCountedInOneAtomicStep() {
+        UUID userId = UUID.randomUUID();
+
+        limiter.recordPasswordChangeFailure(userId);
+
+        ArgumentCaptor<List<String>> keys = ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<Object[]> args = ArgumentCaptor.forClass(Object[].class);
+        verify(redis).execute(any(RedisScript.class), keys.capture(), args.capture());
+        assertThat(keys.getValue()).containsExactly("oj:rl:login:pwchange:" + userId, "oj:rl:lock:pwchange:" + userId);
+        assertThat(args.getValue()).hasSize(4);
+        assertThat(args.getValue()[0]).isEqualTo("5");
+        assertThat(args.getValue()[1]).isEqualTo("300000");
+        assertThat(args.getValue()[3]).isEqualTo("900000");
+        verify(valueOps, never()).increment(anyString());
+        verify(redis, never()).expire(anyString(), any(Duration.class));
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void aReservationChecksTheAddressForALock_butTakesNoPlaceInItsCounter() {
