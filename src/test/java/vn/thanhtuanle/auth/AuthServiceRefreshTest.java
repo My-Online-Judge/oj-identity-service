@@ -48,9 +48,9 @@ class AuthServiceRefreshTest {
     private User arrangeValidRefresh(String refreshToken, UUID userId) {
         User user = User.builder().username("alice@example.com").status(CommonStatus.ACTIVE.getValue()).build();
         user.setId(userId);
-        Token stored = Token.builder().token(refreshToken).tokenType(TokenType.REFRESH).build();
+        Token stored = Token.builder().token(TokenHasher.sha256Hex(refreshToken)).tokenType(TokenType.REFRESH).build();
         when(jwtUtil.isTokenExpired(refreshToken)).thenReturn(false);
-        when(tokenRepository.findByToken(refreshToken)).thenReturn(Optional.of(stored));
+        when(tokenRepository.findByToken(TokenHasher.sha256Hex(refreshToken))).thenReturn(Optional.of(stored));
         when(jwtUtil.extractUsername(refreshToken)).thenReturn("alice@example.com");
         when(userRepository.findByUsername("alice@example.com")).thenReturn(Optional.of(user));
         when(jwtUtil.generateToken(user)).thenReturn("new.access.token");
@@ -68,6 +68,18 @@ class AuthServiceRefreshTest {
         InOrder order = inOrder(tokenRepository);
         order.verify(tokenRepository).deleteAllByUserIdAndTokenType(userId, TokenType.ACCESS);
         order.verify(tokenRepository).save(any(Token.class));
+    }
+
+    @Test
+    void refresh_looksUpTheHashNotTheRawToken() {
+        UUID userId = UUID.randomUUID();
+        arrangeValidRefresh("valid.refresh.token", userId);
+
+        authService.refreshAccessToken("valid.refresh.token", META);
+
+        // Rows hold SHA-256 hex (V5), so a lookup by the raw token would never find a session.
+        verify(tokenRepository).findByToken(TokenHasher.sha256Hex("valid.refresh.token"));
+        verify(tokenRepository, never()).findByToken("valid.refresh.token");
     }
 
     @Test
@@ -90,9 +102,9 @@ class AuthServiceRefreshTest {
         String refreshToken = "valid.refresh.token";
         User user = User.builder().username("alice@example.com").status(CommonStatus.INACTIVE.getValue()).build();
         user.setId(userId);
-        Token stored = Token.builder().token(refreshToken).tokenType(TokenType.REFRESH).build();
+        Token stored = Token.builder().token(TokenHasher.sha256Hex(refreshToken)).tokenType(TokenType.REFRESH).build();
         when(jwtUtil.isTokenExpired(refreshToken)).thenReturn(false);
-        when(tokenRepository.findByToken(refreshToken)).thenReturn(Optional.of(stored));
+        when(tokenRepository.findByToken(TokenHasher.sha256Hex(refreshToken))).thenReturn(Optional.of(stored));
         when(jwtUtil.extractUsername(refreshToken)).thenReturn("alice@example.com");
         when(userRepository.findByUsername("alice@example.com")).thenReturn(Optional.of(user));
 

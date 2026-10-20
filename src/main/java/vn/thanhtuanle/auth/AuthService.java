@@ -248,7 +248,7 @@ public class AuthService {
     private void savedUserToken(User user, String jwtToken, TokenType tokenType, ClientMeta meta) {
         var token = Token.builder()
                 .user(user)
-                .token(jwtToken)
+                .token(TokenHasher.sha256Hex(jwtToken))
                 .tokenType(tokenType)
                 .expired(false)
                 .revoked(false)
@@ -278,7 +278,7 @@ public class AuthService {
             throw new AppException(ErrorCode.INVALID_CREDENTIALS);
         }
 
-        var stored = tokenRepository.findByToken(refreshToken)
+        var stored = tokenRepository.findByToken(TokenHasher.sha256Hex(refreshToken))
                 .orElseThrow(() -> new AppException(ErrorCode.INVALID_CREDENTIALS));
         if (stored.isRevoked() || stored.isExpired() || stored.getTokenType() != TokenType.REFRESH) {
             throw new AppException(ErrorCode.INVALID_CREDENTIALS);
@@ -358,7 +358,7 @@ public class AuthService {
         }
 
         if (isValid) {
-            var storedToken = tokenRepository.findByToken(token)
+            var storedToken = tokenRepository.findByToken(TokenHasher.sha256Hex(token))
                     .orElse(null);
             if (storedToken == null || storedToken.isRevoked() || storedToken.isExpired()
                     || !storedToken.getTokenType().equals(request.getTokenType())) {

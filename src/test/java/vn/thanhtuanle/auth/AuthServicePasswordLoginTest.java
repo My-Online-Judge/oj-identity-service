@@ -2,6 +2,7 @@ package vn.thanhtuanle.auth;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -13,6 +14,7 @@ import vn.thanhtuanle.oj.common.web.error.AppException;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.common.util.JwtUtil;
+import vn.thanhtuanle.entity.Token;
 import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.repository.TokenRepository;
 import vn.thanhtuanle.security.LoginAttemptService;
@@ -68,6 +70,23 @@ class AuthServicePasswordLoginTest {
         assertThat(res.getRefreshToken()).isEqualTo("RT");
         verify(tokenRepository).deleteAllByUserId(u.getId());   // old tokens revoked
         verify(tokenRepository, times(2)).save(any());          // access + refresh recorded
+    }
+
+    @Test
+    void login_storesHashesNotTokens() {
+        User u = admin(CommonStatus.ACTIVE.getValue(), HASH);
+        when(userRepository.findByUsername("admin")).thenReturn(Optional.of(u));
+        when(passwordEncoder.matches("secret", HASH)).thenReturn(true);
+        when(jwtUtil.generateToken(u)).thenReturn("AT");
+        when(jwtUtil.generateRefreshToken(u)).thenReturn("RT");
+
+        authService.authenticateWithPassword("admin", "secret", META);
+
+        // A database leak must not hand out live sessions: rows keep SHA-256 hex, the client keeps the token.
+        ArgumentCaptor<Token> saved = ArgumentCaptor.forClass(Token.class);
+        verify(tokenRepository, times(2)).save(saved.capture());
+        assertThat(saved.getAllValues()).extracting(Token::getToken)
+                .containsExactly(TokenHasher.sha256Hex("AT"), TokenHasher.sha256Hex("RT"));
     }
 
     @Test

@@ -29,6 +29,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * the kid header) is well over that. H2, which the rest of the suite runs on, does not enforce
  * varchar column length under ddl-auto=update, so this must run against real Postgres via
  * Testcontainers to catch it. See .superpowers/sdd/task-4b-brief.md.
+ *
+ * <p>Since V5 the column holds the token's SHA-256 hex ({@link TokenHasher}), not the token. It stays {@code text}
+ * anyway: a pre-SP12 image (after a rollback) writes the raw RS256 token again.
  */
 @Testcontainers
 class TokenColumnLengthTest {
@@ -78,34 +81,43 @@ class TokenColumnLengthTest {
         }
     }
 
+    private static String storedToken(Connection conn, UUID id) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT token FROM t_tokens WHERE id = ?")) {
+            ps.setObject(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                assertThat(rs.next()).isTrue();
+                return rs.getString("token");
+            }
+        }
+    }
+
     @Test
-    void realRs256Token_roundTrips_andUniqueConstraintStillHolds() throws Exception {
+    void hashOfARealRs256Token_roundTrips_andUniqueConstraintStillHolds() throws Exception {
         migrate();
 
         String token = realRs256Token();
         // Sanity check that this is genuinely the scenario that broke prod, not a shorter stand-in.
         assertThat(token.length()).isGreaterThan(255);
+        String hash = TokenHasher.sha256Hex(token);
 
-        UUID id = UUID.randomUUID();
         try (Connection conn = DriverManager.getConnection(
                 POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())) {
 
-            insertToken(conn, id, token);
-
-            try (PreparedStatement ps = conn.prepareStatement("SELECT token FROM t_tokens WHERE id = ?")) {
-                ps.setObject(1, id);
-                try (ResultSet rs = ps.executeQuery()) {
-                    assertThat(rs.next()).isTrue();
-                    assertThat(rs.getString("token")).isEqualTo(token); // byte-identical round-trip
-                }
-            }
+            UUID id = UUID.randomUUID();
+            insertToken(conn, id, hash);
+            assertThat(storedToken(conn, id)).isEqualTo(hash).hasSize(64); // what AuthService writes since V5
 
             // UNIQUE constraint (ukdjdnp60wf0lq8erni3suse1np on t_tokens.token) must survive the
             // ALTER TYPE text and still reject a duplicate token value.
             UUID dupeId = UUID.randomUUID();
-            assertThatThrownBy(() -> insertToken(conn, dupeId, token))
+            assertThatThrownBy(() -> insertToken(conn, dupeId, hash))
                     .isInstanceOf(SQLException.class)
                     .hasMessageContaining("duplicate key value violates unique constraint");
+
+            // A pre-SP12 image after a rollback stores the raw token: the column must still hold it byte for byte.
+            UUID rawId = UUID.randomUUID();
+            insertToken(conn, rawId, token);
+            assertThat(storedToken(conn, rawId)).isEqualTo(token);
         }
     }
 }
