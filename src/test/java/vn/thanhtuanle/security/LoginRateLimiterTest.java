@@ -4,6 +4,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -27,6 +28,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -90,8 +93,9 @@ class LoginRateLimiterTest {
     void theFailureThatReachesALimitLocksIt() {
         limiter.recordFailure(new Attempt("alice", "1.2.3.4", 5, 50, 29));
 
-        verify(valueOps).set("oj:rl:lock:pair:alice|1.2.3.4", "1", Duration.ofMinutes(15));
-        verify(valueOps).set("oj:rl:lock:account:alice", "1", Duration.ofMinutes(15));
+        // A failure's lock is told apart from a probe's, so a probe that succeeds later cannot lift it.
+        verify(valueOps).set(eq("oj:rl:lock:pair:alice|1.2.3.4"), startsWith("fail:"), eq(Duration.ofMinutes(15)));
+        verify(valueOps).set(eq("oj:rl:lock:account:alice"), startsWith("fail:"), eq(Duration.ofMinutes(15)));
         verify(valueOps, never()).set(org.mockito.ArgumentMatchers.eq("oj:rl:lock:ip:1.2.3.4"), anyString(),
                 any(Duration.class));
     }
@@ -106,12 +110,28 @@ class LoginRateLimiterTest {
     }
 
     @Test
-    void aReservationThatWentOverALimitIsItsProbe() {
+    void aReservationThatWentOverALimitIsItsProbe_andKnowsItsLock() {
         scriptAnswers(List.of(1L, 6L, 12L, 7L, 1L, 0L, 0L));
 
         Attempt attempt = limiter.reserve("alice", META);
 
-        assertThat(attempt).isEqualTo(new Attempt("alice", "1.2.3.4", 6, 12, 7, true, false, false));
+        assertThat(attempt.pairCount()).isEqualTo(6);
+        assertThat(attempt.accountCount()).isEqualTo(12);
+        assertThat(attempt.ipCount()).isEqualTo(7);
+        assertThat(attempt.pairProbe()).isTrue();
+        assertThat(attempt.accountProbe()).isFalse();
+        assertThat(attempt.ipProbe()).isFalse();
+        // The value the script wrote into the lock it set, so its success or release lifts that lock only.
+        ArgumentCaptor<Object[]> args = ArgumentCaptor.forClass(Object[].class);
+        verify(redis).execute(any(RedisScript.class), anyList(), args.capture());
+        assertThat(attempt.probeToken()).startsWith("probe:").isIn(args.getValue());
+    }
+
+    @Test
+    void probeTokensAreUnique() {
+        scriptAnswers(List.of(1L, 6L, 12L, 7L, 1L, 0L, 0L));
+
+        assertThat(limiter.reserve("alice", META).probeToken()).isNotEqualTo(limiter.reserve("alice", META).probeToken());
     }
 
     @Test

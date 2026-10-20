@@ -379,6 +379,26 @@ class TokenMutationRaceTest {
         assertThat(rowsOf(session.userId())).containsExactly("ACCESS false", "REFRESH false");
     }
 
+    @Test
+    void aPasswordResetWaitingTooLongForTheUserRowAnswers503_andChangesNothing() throws Exception {
+        Session session = login();
+        String hash = passwordOf(session.userId());
+
+        // The flushed UPDATE of the password is the statement that meets the held row, so the lock timeout must
+        // already be in force when it runs, not only for the SELECT … FOR UPDATE after it.
+        assertGivesUpWith503(() -> {
+            userService.resetPassword(session.userId(), "Reset1234");
+            return null;
+        }, session.userId());
+
+        assertThat(passwordOf(session.userId())).isEqualTo(hash);
+        assertThat(rowsOf(session.userId())).containsExactly("ACCESS false", "REFRESH false");
+    }
+
+    private String passwordOf(UUID userId) {
+        return jdbc.queryForObject("select password from t_users where id = ?", String.class, userId);
+    }
+
     /** A logout whose access token has expired: the refresh cookie names the session. */
     private void logout(Session session) {
         authService.logout(session.refreshToken());

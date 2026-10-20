@@ -93,6 +93,12 @@ class LoginRateLimiterRedisTest {
                 });
     }
 
+    private void assertRetryAfter(String username, String ip, long atLeast, long atMost) {
+        assertThatThrownBy(() -> limiter.reserve(username, from(ip)))
+                .isInstanceOfSatisfying(RateLimitedException.class, e ->
+                        assertThat(e.getRetryAfterSeconds()).isBetween(atLeast, atMost));
+    }
+
     private void assertAllowed(String username, String ip) {
         assertThatCode(() -> limiter.reserve(username, from(ip))).doesNotThrowAnyException();
     }
@@ -126,13 +132,54 @@ class LoginRateLimiterRedisTest {
         assertThat(redis.hasKey("oj:rl:lock:pair:alice|10.0.0.1")).isFalse();
 
         // The sixth goes over the limit: it locks the pair in the same step and is let through as the one probe.
-        assertThat(limiter.reserve("alice", from("10.0.0.1")).pairCount()).isEqualTo(6);
+        Attempt probe = limiter.reserve("alice", from("10.0.0.1"));
+        assertThat(probe.pairCount()).isEqualTo(6);
         assertThat(ttl("oj:rl:lock:pair:alice|10.0.0.1")).isBetween(890L, 900L);
+        assertThat(value("oj:rl:lock:pair:alice|10.0.0.1")).startsWith("probe:").isEqualTo(probe.probeToken());
 
-        assertThatThrownBy(() -> limiter.reserve("alice", from("10.0.0.1")))
-                .isInstanceOfSatisfying(RateLimitedException.class, e ->
-                        assertThat(e.getRetryAfterSeconds()).isBetween(899L, 900L));
+        // Refused while the probe is in flight: it usually settles within a second, so "retry in 2 s", not 15 min.
+        assertRetryAfter("alice", "10.0.0.1", 2, 2);
         assertThat(value("oj:rl:login:pair:alice|10.0.0.1")).isEqualTo("6");
+    }
+
+    @Test
+    void aHallBehindOneAddressThatSignsInAtOnce_isToldToRetryInTwoSeconds() {
+        // Thirty correct logins from one NAT address still in flight (BCrypt queued behind each other) ...
+        for (int i = 0; i < 30; i++) {
+            limiter.reserve("student" + i, from("10.0.0.1"));
+        }
+        // ... the 31st becomes the IP's probe, and the 32nd is refused only until that probe settles.
+        assertThat(limiter.reserve("student30", from("10.0.0.1")).ipProbe()).isTrue();
+
+        assertRetryAfter("student31", "10.0.0.1", 2, 2);
+    }
+
+    @Test
+    void aRefusalOnAFailureLock_answersWhatIsLeftOfIt() {
+        fail("alice", "10.0.0.1", 5);
+        assertThat(value("oj:rl:lock:pair:alice|10.0.0.1")).startsWith("fail:");
+
+        assertRetryAfter("alice", "10.0.0.1", 899, 900);
+
+        // A lock written before locks carried a token ("1") is a failure's lock too.
+        redis.opsForValue().set("oj:rl:lock:ip:10.0.0.9", "1", Duration.ofSeconds(120));
+        assertRetryAfter("bob", "10.0.0.9", 119, 120);
+    }
+
+    @Test
+    void aFailureInFlightThatLocksAgain_survivesTheProbesSuccess() {
+        fail("alice", "10.0.0.1", 4);
+        Attempt fifth = limiter.reserve("alice", from("10.0.0.1"));
+        Attempt probe = limiter.reserve("alice", from("10.0.0.1"));
+        assertThat(probe.pairProbe()).isTrue();
+
+        // The fifth was still being checked when the probe was let through; it fails and locks the pair itself.
+        limiter.recordFailure(fifth);
+        limiter.recordSuccess(probe);
+
+        // The probe lifts only its own lock: the failure's lock stays for its 15 minutes.
+        assertThat(value("oj:rl:lock:pair:alice|10.0.0.1")).startsWith("fail:");
+        assertRetryAfter("alice", "10.0.0.1", 899, 900);
     }
 
     @Test
@@ -262,7 +309,7 @@ class LoginRateLimiterRedisTest {
         fail("alice", "10.9.9.9");
 
         assertThat(ttl("oj:rl:lock:account:alice")).isBetween(890L, 900L);
-        assertRefused("alice", "10.9.9.8");
+        assertRetryAfter("alice", "10.9.9.8", 899, 900);
     }
 
     @Test

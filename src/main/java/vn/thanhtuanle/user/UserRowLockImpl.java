@@ -1,6 +1,7 @@
 package vn.thanhtuanle.user;
 
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.FlushModeType;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.LockTimeoutException;
 import jakarta.persistence.PersistenceContext;
@@ -16,7 +17,8 @@ import java.util.UUID;
  * The lock behind {@link UserRowLock#lockById}: {@code SELECT … FOR UPDATE} with a 5 s lock timeout.
  *
  * <p>The timeout is {@code SET LOCAL lock_timeout} in the caller's transaction (it then bounds that transaction's later
- * lock waits too, and ends with it). The JPA hint {@code jakarta.persistence.lock.timeout} is not enough: Hibernate 6.6's
+ * lock waits too, and ends with it), and it runs before any pending write of the transaction is flushed, so that write's
+ * row wait is bounded too. The JPA hint {@code jakarta.persistence.lock.timeout} is not enough: Hibernate 6.6's
  * PostgreSQL dialect ignores a positive timeout, and a test showed the lock waiting past 10 s with it. H2 (the test
  * profile) has no such statement and is left alone.
  */
@@ -32,7 +34,12 @@ class UserRowLockImpl implements UserRowLock {
     @Override
     public Optional<User> lockById(UUID id) {
         if (isPostgres()) {
-            entityManager.createNativeQuery("set local lock_timeout = '" + LOCK_TIMEOUT + "'").executeUpdate();
+            // Not flushed first (a native query in AUTO mode flushes the whole session): a pending write of this
+            // user, such as a password change's UPDATE, would meet a held row before the timeout is set and wait
+            // without limit. The locking select below flushes it, under the timeout.
+            entityManager.createNativeQuery("set local lock_timeout = '" + LOCK_TIMEOUT + "'")
+                    .setFlushMode(FlushModeType.COMMIT)
+                    .executeUpdate();
         }
         try {
             return entityManager.createQuery("select u from User u where u.id = :id", User.class)

@@ -33,6 +33,12 @@ import java.util.concurrent.TimeUnit;
  * most limit + 1 password checks per key, and after a lock runs out one probe may try again: the right password signs
  * in, a wrong one locks for another 15 minutes.
  *
+ * <p>A lock's value says who set it: {@code probe:<random>} for the probe's, {@code fail:<random>} for a failure's. The
+ * probe lifts only a lock that still holds its own value, so a failure still in flight that locked the key again keeps
+ * its lock. A refusal answers what is left of a failure's lock, but "retry in 2 s" for a probe's: a probe usually
+ * settles within a second, and correct logins in flight count too, so a hall behind one address that signs in at once
+ * is not told to come back in 15 minutes.
+ *
  * <p>Locking the pair, not the username, means a spray against alice from one address cannot lock alice out from her
  * own; the account and IP ceilings bound a distributed guess and a single-address spray. A pair's fourth and fifth
  * failures also cost a delay ({@link #backoff}).
@@ -54,24 +60,39 @@ public class LoginRateLimiter {
     static final int ACCOUNT_LIMIT = 50;
     static final int PASSWORD_CHANGE_LIMIT = 5;
     static final Duration MAX_BACKOFF = Duration.ofSeconds(8);
+    /** The Retry-After of a refusal by a probe's lock: the probe is in flight, and usually settles within a second. */
+    static final Duration PROBE_RETRY = Duration.ofSeconds(2);
+    /** The value prefixes of a lock set by the probe and by a failure (the RESERVE script reads the probe's). */
+    static final String PROBE_LOCK = "probe:";
+    static final String FAIL_LOCK = "fail:";
     /** A lock's length, so the longest Retry-After: a refusal answers what is left of the locks refusing it. */
     public static final long LOCK_SECONDS = LOCK.toSeconds();
 
     /**
-     * KEYS: lock_1, counter_1, lock_2, counter_2, …  ARGV: limit_1, window_ms_1, limit_2, window_ms_2, …, lock_ms.
-     * Refused when a lock exists: {0, the longest PTTL among them}. Otherwise every counter is incremented (its window
-     * starts with its first attempt), and one that goes over its limit locks its key: this attempt is the probe.
-     * Returns {1, count_1, …, count_n, probe_1, …, probe_n}.
+     * KEYS: lock_1, counter_1, lock_2, counter_2, …  ARGV: limit_1, window_ms_1, limit_2, window_ms_2, …, then lock_ms,
+     * this attempt's probe token ({@code probe:<random>}) and the probe's retry in ms.
+     * Refused when a lock exists: {0, the longest wait among them}, where a failure's lock (any value not starting with
+     * {@code probe:}) waits its PTTL and a probe's the probe retry. Otherwise every counter is incremented (its window
+     * starts with its first attempt), and one that goes over its limit locks its key with the probe token: this attempt
+     * is the probe. Returns {1, count_1, …, count_n, probe_1, …, probe_n}.
      */
     @SuppressWarnings("rawtypes")
     private static final RedisScript<List> RESERVE = RedisScript.of("""
             local dimensions = #KEYS / 2
+            local lockMs = ARGV[2 * dimensions + 1]
+            local probeToken = ARGV[2 * dimensions + 2]
+            local probeRetryMs = tonumber(ARGV[2 * dimensions + 3])
             local refused, retry = false, 0
             for i = 1, dimensions do
               local lock = KEYS[2 * i - 1]
-              if redis.call('EXISTS', lock) == 1 then
+              local holder = redis.call('GET', lock)
+              if holder then
                 refused = true
-                retry = math.max(retry, redis.call('PTTL', lock))
+                if string.sub(holder, 1, 6) == 'probe:' then
+                  retry = math.max(retry, probeRetryMs)
+                else
+                  retry = math.max(retry, redis.call('PTTL', lock))
+                end
               end
             end
             if refused then
@@ -87,7 +108,7 @@ public class LoginRateLimiter {
               result[1 + i] = count
               result[1 + dimensions + i] = 0
               if count > tonumber(ARGV[2 * i - 1]) then
-                redis.call('SET', KEYS[2 * i - 1], '1', 'PX', ARGV[#ARGV])
+                redis.call('SET', KEYS[2 * i - 1], probeToken, 'PX', lockMs)
                 result[1 + dimensions + i] = 1
               end
             end
@@ -95,10 +116,11 @@ public class LoginRateLimiter {
             """, List.class);
 
     /**
-     * KEYS: the counters an attempt hands back, then the locks it set as the probe (deleted). ARGV[1]: how many of KEYS
-     * are counters. ARGV[2]: '1' when the first counter is the pair's and is deleted (a success forgives its typos);
-     * otherwise every counter gives back one place. A counter that has expired meanwhile is not recreated at -1
-     * (without a TTL it would hand out extra attempts forever).
+     * KEYS: the counters an attempt hands back, then the locks it set as the probe. ARGV[1]: how many of KEYS are
+     * counters. ARGV[2]: '1' when the first counter is the pair's and is deleted (a success forgives its typos);
+     * otherwise every counter gives back one place. ARGV[3]: the attempt's probe token; a lock is deleted only while it
+     * still holds it (a failure may have locked the key again meanwhile). A counter that has expired meanwhile is not
+     * recreated at -1 (without a TTL it would hand out extra attempts forever).
      */
     private static final RedisScript<Long> RELEASE = RedisScript.of("""
             local counters = tonumber(ARGV[1])
@@ -110,22 +132,25 @@ public class LoginRateLimiter {
               end
             end
             for i = counters + 1, #KEYS do
-              redis.call('DEL', KEYS[i])
+              if redis.call('GET', KEYS[i]) == ARGV[3] then
+                redis.call('DEL', KEYS[i])
+              end
             end
             return 1
             """, Long.class);
 
     /**
      * One login attempt's places in the counters, as {@link #reserve} took them: its ordinal in the pair, account and IP
-     * windows (0 for a dimension that was not counted: blank, or Redis was down), and for each whether this attempt
-     * went over the limit and locked it, i.e. is that key's probe.
+     * windows (0 for a dimension that was not counted: blank, or Redis was down), for each whether this attempt went
+     * over the limit and locked it, i.e. is that key's probe, and the value it wrote into those locks ({@code null}
+     * when it is no key's probe).
      */
     public record Attempt(String username, String ip, long pairCount, long accountCount, long ipCount,
-                          boolean pairProbe, boolean accountProbe, boolean ipProbe) {
+                          boolean pairProbe, boolean accountProbe, boolean ipProbe, String probeToken) {
 
         /** An attempt that is no key's probe. */
         public Attempt(String username, String ip, long pairCount, long accountCount, long ipCount) {
-            this(username, ip, pairCount, accountCount, ipCount, false, false, false);
+            this(username, ip, pairCount, accountCount, ipCount, false, false, false, null);
         }
     }
 
@@ -160,8 +185,9 @@ public class LoginRateLimiter {
 
     /**
      * Takes this attempt's place in the pair, account and IP counters before its password is checked. Throws 429
-     * RATE_LIMITED, with Retry-After = what is left of the longest of the locks refusing it (at most 15 minutes), when
-     * the pair, the account or the IP is locked. An attempt that goes over a limit locks that key and is its probe.
+     * RATE_LIMITED when the pair, the account or the IP is locked, with Retry-After = the longest wait among the locks
+     * refusing it: what is left of a failure's lock (at most 15 minutes), 2 s for a probe's. An attempt that goes over
+     * a limit locks that key and is its probe.
      */
     @SuppressWarnings("unchecked")
     public Attempt reserve(String username, ClientMeta meta) {
@@ -177,7 +203,10 @@ public class LoginRateLimiter {
             args.add(String.valueOf(d.limit()));
             args.add(String.valueOf(d.window().toMillis()));
         }
+        String probeToken = PROBE_LOCK + UUID.randomUUID();
         args.add(String.valueOf(LOCK.toMillis()));
+        args.add(probeToken);
+        args.add(String.valueOf(PROBE_RETRY.toMillis()));
         List<Long> result;
         try {
             result = redis.execute(RESERVE, keys, args.toArray());
@@ -200,9 +229,10 @@ public class LoginRateLimiter {
             counts[kind] = result.get(1 + i);
             probes[kind] = result.size() > 1 + n + i && result.get(1 + n + i) == 1L;
         }
+        boolean probe = probes[Kind.PAIR.ordinal()] || probes[Kind.ACCOUNT.ordinal()] || probes[Kind.IP.ordinal()];
         return new Attempt(username, meta.ip(), counts[Kind.PAIR.ordinal()], counts[Kind.ACCOUNT.ordinal()],
                 counts[Kind.IP.ordinal()], probes[Kind.PAIR.ordinal()], probes[Kind.ACCOUNT.ordinal()],
-                probes[Kind.IP.ordinal()]);
+                probes[Kind.IP.ordinal()], probe ? probeToken : null);
     }
 
     /**
@@ -211,10 +241,11 @@ public class LoginRateLimiter {
      * attempt is a probe, or got past a lock that is in force by now: delaying it would only hold a worker thread).
      */
     public Duration recordFailure(Attempt attempt) {
+        String failToken = FAIL_LOCK + UUID.randomUUID();
         try {
-            lockAtLimit(pair(attempt.username(), attempt.ip()), attempt.pairCount(), PAIR_LIMIT);
-            lockAtLimit(account(attempt.username()), attempt.accountCount(), ACCOUNT_LIMIT);
-            lockAtLimit(ip(attempt.ip()), attempt.ipCount(), IP_LIMIT);
+            lockAtLimit(pair(attempt.username(), attempt.ip()), attempt.pairCount(), PAIR_LIMIT, failToken);
+            lockAtLimit(account(attempt.username()), attempt.accountCount(), ACCOUNT_LIMIT, failToken);
+            lockAtLimit(ip(attempt.ip()), attempt.ipCount(), IP_LIMIT, failToken);
         } catch (Exception e) {
             failOpen("lock not set", e);
         }
@@ -224,7 +255,7 @@ public class LoginRateLimiter {
     /**
      * A success is not a failure: it hands its account and IP places back, forgives its pair's earlier typos (the pair
      * counter is deleted) and lifts any lock it set as the probe. Earlier failures still count against the account and
-     * the IP.
+     * the IP. A lock that a failure set again meanwhile stays.
      */
     public void recordSuccess(Attempt attempt) {
         settle(attempt, true);
@@ -254,20 +285,24 @@ public class LoginRateLimiter {
             counters.add(COUNT_PREFIX + ip);
         }
         List<String> keys = new ArrayList<>(counters);
-        if (attempt.pairProbe() && pair != null) {
-            keys.add(LOCK_PREFIX + pair);
-        }
-        if (attempt.accountProbe() && account != null) {
-            keys.add(LOCK_PREFIX + account);
-        }
-        if (attempt.ipProbe() && ip != null) {
-            keys.add(LOCK_PREFIX + ip);
+        String probeToken = attempt.probeToken();
+        if (probeToken != null) {
+            if (attempt.pairProbe() && pair != null) {
+                keys.add(LOCK_PREFIX + pair);
+            }
+            if (attempt.accountProbe() && account != null) {
+                keys.add(LOCK_PREFIX + account);
+            }
+            if (attempt.ipProbe() && ip != null) {
+                keys.add(LOCK_PREFIX + ip);
+            }
         }
         if (keys.isEmpty()) {
             return;
         }
         try {
-            redis.execute(RELEASE, keys, String.valueOf(counters.size()), deletePair ? "1" : "0");
+            redis.execute(RELEASE, keys, String.valueOf(counters.size()), deletePair ? "1" : "0",
+                    probeToken == null ? "" : probeToken);
         } catch (Exception e) {
             failOpen("counters not released", e);
         }
@@ -313,9 +348,9 @@ public class LoginRateLimiter {
         log.warn("Rate limiter unavailable, {}: {}", outcome, e.getMessage());
     }
 
-    private void lockAtLimit(String suffix, long count, int limit) {
+    private void lockAtLimit(String suffix, long count, int limit, String failToken) {
         if (suffix != null && count >= limit) {
-            redis.opsForValue().set(LOCK_PREFIX + suffix, "1", LOCK);
+            redis.opsForValue().set(LOCK_PREFIX + suffix, failToken, LOCK);
         }
     }
 
