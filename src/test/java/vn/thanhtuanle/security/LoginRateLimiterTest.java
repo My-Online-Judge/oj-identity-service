@@ -11,22 +11,27 @@ import org.mockito.quality.Strictness;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.data.redis.core.script.RedisScript;
 import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.oj.common.web.error.RateLimitedException;
+import vn.thanhtuanle.security.LoginRateLimiter.Attempt;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** The limiter's own logic with Redis mocked; the key formats and TTLs are pinned by LoginRateLimiterRedisTest. */
+/** The limiter's own logic with Redis mocked; the scripts, key formats and TTLs are pinned by LoginRateLimiterRedisTest. */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class LoginRateLimiterTest {
@@ -43,12 +48,16 @@ class LoginRateLimiterTest {
     void setUp() {
         registry = new SimpleMeterRegistry();
         when(redis.opsForValue()).thenReturn(valueOps);
-        when(redis.countExistingKeys(anyCollection())).thenReturn(0L);
         limiter = new LoginRateLimiter(redis, registry);
     }
 
     private double fallbacks() {
         return registry.counter("oj.redis.fallback", "lookup", "login").count();
+    }
+
+    @SuppressWarnings("unchecked")
+    private void scriptAnswers(List<Long> result) {
+        when(redis.execute(any(RedisScript.class), anyList(), any(Object[].class))).thenReturn(result);
     }
 
     @Test
@@ -65,32 +74,56 @@ class LoginRateLimiterTest {
     }
 
     @Test
-    void recordFailure_returnsTheBackoffOfThePairCount_notOfTheAccountOrIp() {
-        when(valueOps.increment("oj:rl:login:pair:alice|1.2.3.4")).thenReturn(4L);
-        when(valueOps.increment("oj:rl:login:account:alice")).thenReturn(40L);
-        when(valueOps.increment("oj:rl:login:ip:1.2.3.4")).thenReturn(20L);
-
-        assertThat(limiter.recordFailure("alice", META)).isEqualTo(Duration.ofSeconds(2));
+    void aFailureIsDelayedByItsPairCount_notByTheAccountOrIp() {
+        assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 4, 40, 20))).isEqualTo(Duration.ofSeconds(2));
+        assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 5, 1, 1))).isEqualTo(Duration.ofSeconds(4));
     }
 
     @Test
-    void lockedLogin_is429WithTheLockLengthAsRetryAfter() {
-        when(redis.countExistingKeys(anyCollection())).thenReturn(1L);
+    void aFailurePastThePairLimitIsAnsweredAtOnce() {
+        // It got past a lock that is in force by now: delaying it would only hold a worker thread.
+        assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 6, 6, 6))).isZero();
+        assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 200, 200, 200))).isZero();
+    }
 
-        // A RateLimitedException, so the shared handler answers 429 with Retry-After = the lock's length.
-        assertThatThrownBy(() -> limiter.assertAllowed("alice", META))
+    @Test
+    void theFailureThatReachesALimitLocksIt() {
+        limiter.recordFailure(new Attempt("alice", "1.2.3.4", 5, 50, 29));
+
+        verify(valueOps).set("oj:rl:lock:pair:alice|1.2.3.4", "1", Duration.ofMinutes(15));
+        verify(valueOps).set("oj:rl:lock:account:alice", "1", Duration.ofMinutes(15));
+        verify(valueOps, never()).set(org.mockito.ArgumentMatchers.eq("oj:rl:lock:ip:1.2.3.4"), anyString(),
+                any(Duration.class));
+    }
+
+    @Test
+    void aReservationReturnsTheCountsOfThisAttempt() {
+        scriptAnswers(List.of(1L, 3L, 12L, 7L));
+
+        Attempt attempt = limiter.reserve("alice", META);
+
+        assertThat(attempt).isEqualTo(new Attempt("alice", "1.2.3.4", 3, 12, 7));
+    }
+
+    @Test
+    void aRefusedReservationIs429WithTheTimeLeft() {
+        scriptAnswers(List.of(0L, 29_001L));
+
+        // A RateLimitedException, so the shared handler answers 429 with this Retry-After.
+        assertThatThrownBy(() -> limiter.reserve("alice", META))
                 .isInstanceOfSatisfying(RateLimitedException.class, e -> {
                     assertThat(e.getErrorCode()).isEqualTo(ErrorCode.RATE_LIMITED);
-                    assertThat(e.getRetryAfterSeconds()).isEqualTo(LoginRateLimiter.LOCK_SECONDS);
+                    assertThat(e.getRetryAfterSeconds()).isEqualTo(30);
                 });
         assertThat(registry.counter("oj.login.rate_limited").count()).isEqualTo(1);
     }
 
     @Test
     void redisDown_failsOpen() {
-        when(redis.countExistingKeys(anyCollection())).thenThrow(new RedisConnectionFailureException("redis down"));
+        when(redis.execute(any(RedisScript.class), anyList(), any(Object[].class)))
+                .thenThrow(new RedisConnectionFailureException("redis down"));
 
-        assertThatCode(() -> limiter.assertAllowed("alice", META)).doesNotThrowAnyException();
+        assertThatCode(() -> limiter.reserve("alice", META)).doesNotThrowAnyException();
         // Counted, so the RedisUnavailable alert covers identity like the gateway and submission.
         assertThat(fallbacks()).isEqualTo(1);
     }
@@ -98,18 +131,22 @@ class LoginRateLimiterTest {
     @Test
     void redisDown_everyCallFailsOpen_withNoDelay_andIsCounted() {
         RedisConnectionFailureException down = new RedisConnectionFailureException("redis down");
+        when(redis.execute(any(RedisScript.class), anyList(), any(Object[].class))).thenThrow(down);
         when(valueOps.increment(anyString())).thenThrow(down);
-        when(redis.delete(anyString())).thenThrow(down);
-        when(redis.countExistingKeys(anyCollection())).thenThrow(down);
+        org.mockito.Mockito.doThrow(down).when(valueOps).set(anyString(), anyString(), any(Duration.class));
+        when(redis.getExpire(anyString(), any())).thenThrow(down);
         when(redis.hasKey(any())).thenThrow(down);
         UUID userId = UUID.randomUUID();
 
-        assertThat(limiter.recordFailure("alice", META)).isZero();
-        assertThatCode(() -> limiter.clear("alice", META)).doesNotThrowAnyException();
+        Attempt unreserved = limiter.reserve("alice", META);
+        assertThat(unreserved.pairCount()).isZero();
+        assertThat(limiter.recordFailure(new Attempt("alice", "1.2.3.4", 5, 1, 1))).isEqualTo(Duration.ofSeconds(4));
+        assertThatCode(() -> limiter.recordSuccess(new Attempt("alice", "1.2.3.4", 1, 1, 1)))
+                .doesNotThrowAnyException();
         assertThatCode(() -> limiter.assertPasswordChangeAllowed(userId)).doesNotThrowAnyException();
         assertThatCode(() -> limiter.recordPasswordChangeFailure(userId)).doesNotThrowAnyException();
 
-        assertThat(fallbacks()).isEqualTo(4);
+        assertThat(fallbacks()).isEqualTo(5);
     }
 
     @Test

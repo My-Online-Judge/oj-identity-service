@@ -1,5 +1,6 @@
 package vn.thanhtuanle.auth;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -23,13 +24,17 @@ import vn.thanhtuanle.entity.Token;
 import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.repository.TokenRepository;
 import vn.thanhtuanle.security.LoginAttemptService;
+import vn.thanhtuanle.oj.common.web.error.RateLimitedException;
 import vn.thanhtuanle.security.LoginRateLimiter;
+import vn.thanhtuanle.security.LoginRateLimiter.Attempt;
+import org.springframework.test.util.ReflectionTestUtils;
 import vn.thanhtuanle.user.RoleRepository;
 import vn.thanhtuanle.user.UserRepository;
 import vn.thanhtuanle.user.mapper.UserMapper;
 
 import java.time.Duration;
 import java.util.Optional;
+import java.util.concurrent.Semaphore;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -59,6 +64,12 @@ class AuthServicePasswordLoginTest {
 
     private static final String HASH = "$2a$10$hash";
     private static final ClientMeta META = new ClientMeta("1.2.3.4", "dev-1", "probe/1.0");
+    private static final Attempt ATTEMPT = new Attempt("admin", "1.2.3.4", 4, 4, 4);
+
+    @BeforeEach
+    void reservesEveryAttempt() {
+        lenient().when(loginRateLimiter.reserve("admin", META)).thenReturn(ATTEMPT);
+    }
 
     private User admin(Integer status, String password) {
         User u = User.builder().username("admin").password(password).status(status).build();
@@ -144,8 +155,12 @@ class AuthServicePasswordLoginTest {
 
         authService.authenticateWithPassword("admin", "secret", META);
 
-        verify(loginRateLimiter).assertAllowed(eq("admin"), any(ClientMeta.class));
-        verify(loginRateLimiter).clear("admin", META);
+        // The reservation taken before the password check is handed back: a success is not a failure.
+        InOrder order = inOrder(loginRateLimiter, passwordEncoder);
+        order.verify(loginRateLimiter).reserve("admin", META);
+        order.verify(passwordEncoder).matches("secret", HASH);
+        order.verify(loginRateLimiter).recordSuccess(ATTEMPT);
+        verify(loginRateLimiter, never()).recordFailure(any());
         verify(loginAttemptService).record(eq("admin"), any(ClientMeta.class), eq(true), isNull());
         verify(sleeper, never()).sleep(any());
     }
@@ -177,14 +192,14 @@ class AuthServicePasswordLoginTest {
         User u = admin(CommonStatus.ACTIVE.getValue(), HASH);
         when(userRepository.findByUsername("admin")).thenReturn(Optional.of(u));
         when(passwordEncoder.matches("wrong", HASH)).thenReturn(false);
-        when(loginRateLimiter.recordFailure("admin", META)).thenReturn(Duration.ofSeconds(4));
+        when(loginRateLimiter.recordFailure(ATTEMPT)).thenReturn(Duration.ofSeconds(4));
 
         assertThatThrownBy(() -> authService.authenticateWithPassword("admin", "wrong", META))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USER_NOT_EXISTED));
 
         InOrder order = inOrder(loginRateLimiter, loginAttemptService, sleeper);
-        order.verify(loginRateLimiter).recordFailure("admin", META);
+        order.verify(loginRateLimiter).recordFailure(ATTEMPT);
         order.verify(loginAttemptService).record("admin", META, false, "USER_NOT_EXISTED");
         order.verify(sleeper).sleep(Duration.ofSeconds(4));
         verifyNoInteractions(transactionManager);
@@ -199,19 +214,54 @@ class AuthServicePasswordLoginTest {
         assertThatThrownBy(() -> authService.authenticateWithPassword("admin", "wrong", META))
                 .isInstanceOf(AppException.class);
 
-        verify(loginRateLimiter).recordFailure(eq("admin"), any(ClientMeta.class));
+        verify(loginRateLimiter).recordFailure(ATTEMPT);
+        verify(loginRateLimiter, never()).recordSuccess(any());
         verify(loginAttemptService).record(eq("admin"), any(ClientMeta.class), eq(false), eq("USER_NOT_EXISTED"));
     }
 
     @Test
-    void lockedKey_rejectsBeforeTouchingTheRepository() {
-        doThrow(new AppException(ErrorCode.RATE_LIMITED))
-                .when(loginRateLimiter).assertAllowed(eq("admin"), any(ClientMeta.class));
+    void aRefusedReservation_neverReachesTheDatabaseOrBCrypt() {
+        // Locked, or five attempts of this pair already in flight.
+        when(loginRateLimiter.reserve("admin", META)).thenThrow(new RateLimitedException(ErrorCode.RATE_LIMITED, 300));
 
         assertThatThrownBy(() -> authService.authenticateWithPassword("admin", "secret", META))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.RATE_LIMITED));
-        verifyNoInteractions(userRepository);
+        verifyNoInteractions(userRepository, passwordEncoder, sleeper);
+        verify(loginRateLimiter, never()).recordFailure(any());
+    }
+
+    @Test
+    void withEveryBackoffPermitTaken_aFailureIsAnsweredAtOnce() {
+        User u = admin(CommonStatus.ACTIVE.getValue(), HASH);
+        when(userRepository.findByUsername("admin")).thenReturn(Optional.of(u));
+        when(passwordEncoder.matches("wrong", HASH)).thenReturn(false);
+        when(loginRateLimiter.recordFailure(ATTEMPT)).thenReturn(Duration.ofSeconds(4));
+        Semaphore permits = (Semaphore) ReflectionTestUtils.getField(authService, "backoffPermits");
+        assertThat(permits.availablePermits()).isEqualTo(AuthService.MAX_CONCURRENT_BACKOFFS);
+        permits.drainPermits();
+
+        // The counters and locks still apply; only the delay is skipped, so no burst can hold every worker thread.
+        assertThatThrownBy(() -> authService.authenticateWithPassword("admin", "wrong", META))
+                .isInstanceOfSatisfying(AppException.class,
+                        e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USER_NOT_EXISTED));
+        verify(loginRateLimiter).recordFailure(ATTEMPT);
+        verifyNoInteractions(sleeper);
+    }
+
+    @Test
+    void aBackoffHandsItsPermitBack() {
+        User u = admin(CommonStatus.ACTIVE.getValue(), HASH);
+        when(userRepository.findByUsername("admin")).thenReturn(Optional.of(u));
+        when(passwordEncoder.matches("wrong", HASH)).thenReturn(false);
+        when(loginRateLimiter.recordFailure(ATTEMPT)).thenReturn(Duration.ofSeconds(4));
+
+        assertThatThrownBy(() -> authService.authenticateWithPassword("admin", "wrong", META))
+                .isInstanceOf(AppException.class);
+
+        verify(sleeper).sleep(Duration.ofSeconds(4));
+        Semaphore permits = (Semaphore) ReflectionTestUtils.getField(authService, "backoffPermits");
+        assertThat(permits.availablePermits()).isEqualTo(AuthService.MAX_CONCURRENT_BACKOFFS);
     }
 
     @Test

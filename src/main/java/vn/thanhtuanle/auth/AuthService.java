@@ -51,6 +51,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.Semaphore;
 
 @Service
 @RequiredArgsConstructor
@@ -62,6 +63,13 @@ public class AuthService {
      * refreshing at once), not theft: it gets 200 and nothing new. Later it is reuse.
      */
     public static final Duration REUSE_GRACE = Duration.ofSeconds(10);
+
+    /**
+     * At most this many failed logins sleep their backoff at the same time. Beyond it a failure is answered at once (its
+     * counters and locks still apply), so no burst can hold more than this slice of the worker threads.
+     */
+    static final int MAX_CONCURRENT_BACKOFFS = 32;
+    private final Semaphore backoffPermits = new Semaphore(MAX_CONCURRENT_BACKOFFS);
 
     private final UserRepository userRepository;
     private final JwtUtil jwtUtil;
@@ -269,13 +277,16 @@ public class AuthService {
      * be used to tell a real username from a wrong password. Mirrors the Google flow's token
      * bookkeeping; the caller sets the returned tokens as HttpOnly cookies.
      *
-     * <p>Deliberately not {@code @Transactional}: a failure sleeps the limiter's backoff (up to 8 s) before
+     * <p>The attempt takes its place in the limiter's counters before the password is checked, so a burst is refused
+     * at once (429) beyond the pair's five, with no BCrypt.
+     *
+     * <p>Deliberately not {@code @Transactional}: a failure sleeps the limiter's backoff (up to 4 s) before
      * answering, and must hold neither a transaction nor a pooled connection meanwhile, or a credential
      * spray would drain the pool and stall every other request. Only a success's writes run in a transaction.
      * The connection part also needs {@code spring.jpa.open-in-view: false} (application.yml).
      */
     public AuthResponse authenticateWithPassword(String username, String password, ClientMeta meta) {
-        loginRateLimiter.assertAllowed(username, meta);
+        LoginRateLimiter.Attempt attempt = loginRateLimiter.reserve(username, meta);
 
         User user;
         try {
@@ -287,19 +298,35 @@ public class AuthService {
                 throw new AppException(ErrorCode.USER_BLOCKED);
             }
         } catch (AppException e) {
-            Duration backoff = loginRateLimiter.recordFailure(username, meta);
+            Duration backoff = loginRateLimiter.recordFailure(attempt);
             loginAttemptService.record(username, meta, false, e.getErrorCode().name());
-            sleeper.sleep(backoff);
+            backOff(backoff);
             throw e;
         }
 
         AuthResponse tokens = transactionTemplate.execute(status -> startPasswordSession(user.getId(), meta));
 
-        loginRateLimiter.clear(username, meta);
+        loginRateLimiter.recordSuccess(attempt);
         loginAttemptService.record(username, meta, true, null);
 
         log.info("Password login for user: {}", username);
         return tokens;
+    }
+
+    /** Sleeps a failed login's delay, unless {@link #MAX_CONCURRENT_BACKOFFS} others already are. */
+    private void backOff(Duration delay) {
+        if (delay == null || delay.isZero() || delay.isNegative()) {
+            return;
+        }
+        if (!backoffPermits.tryAcquire()) {
+            log.debug("Every backoff permit is taken: answering a failed login without its delay");
+            return;
+        }
+        try {
+            sleeper.sleep(delay);
+        } finally {
+            backoffPermits.release();
+        }
     }
 
     /**

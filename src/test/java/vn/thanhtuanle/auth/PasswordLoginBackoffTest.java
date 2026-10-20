@@ -12,7 +12,6 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import vn.thanhtuanle.common.enums.CommonStatus;
-import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.common.util.Sleeper;
 import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.security.LoginRateLimiter;
@@ -27,7 +26,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -62,7 +60,7 @@ class PasswordLoginBackoffTest {
                 .status(CommonStatus.ACTIVE.getValue())
                 .roles(new HashSet<>())
                 .build());
-        when(loginRateLimiter.recordFailure(eq(username), any(ClientMeta.class))).thenReturn(Duration.ofSeconds(2));
+        when(loginRateLimiter.recordFailure(any())).thenReturn(Duration.ofSeconds(2));
         AtomicReference<Boolean> transactionWhileSleeping = new AtomicReference<>();
         AtomicInteger connectionsWhileSleeping = new AtomicInteger(-1);
         doAnswer(invocation -> {
