@@ -12,8 +12,10 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -44,6 +46,7 @@ import vn.thanhtuanle.user.UserRepository;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -445,7 +448,8 @@ class AuthServiceGoogleTest {
         Role userRole = Role.builder().name("USER").build();
         when(roleRepository.findByName("USER")).thenReturn(Optional.of(userRole));
         UUID newId = UUID.randomUUID();
-        when(userRepository.save(any(User.class))).thenAnswer(invocation -> {
+        // Flushed at once, so a unique index that refuses the new account does so inside the transaction.
+        when(userRepository.saveAndFlush(any(User.class))).thenAnswer(invocation -> {
             User saved = invocation.getArgument(0);
             if (saved.getId() == null) {
                 saved.setId(newId);
@@ -472,6 +476,22 @@ class AuthServiceGoogleTest {
         InOrder order = inOrder(userRepository, tokenRepository);
         order.verify(userRepository).lockById(newId);
         order.verify(tokenRepository).deleteAllByUserId(newId);
+    }
+
+    /**
+     * Two first sign-ins for one new account race: the second insert waits on V6's unique index and fails once the
+     * first commits. That is a refusal with the index's reason, audited after the rollback, not a bare 500.
+     */
+    @Test
+    void aNewAccountThatAUniqueIndexRefuses_isRefusedWithItsReason() {
+        googleAnswers(idToken(true));
+        when(roleRepository.findByName("USER")).thenReturn(Optional.of(Role.builder().name("USER").build()));
+        when(userRepository.saveAndFlush(any(User.class))).thenThrow(new DataIntegrityViolationException(
+                "could not execute statement", new ConstraintViolationException("could not execute statement",
+                        new SQLException("duplicate key value violates unique constraint", "23505"),
+                        "ux_users_email_lower")));
+
+        assertRefusedAndAudited(ErrorCode.EMAIL_EXISTED, EMAIL);
     }
 
     @Test

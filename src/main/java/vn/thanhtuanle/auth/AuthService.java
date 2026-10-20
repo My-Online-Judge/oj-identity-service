@@ -5,6 +5,7 @@ import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.*;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -28,6 +29,7 @@ import vn.thanhtuanle.common.enums.TokenType;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.oj.common.web.error.AppException;
 import vn.thanhtuanle.common.exception.ErrorCode;
+import vn.thanhtuanle.common.exception.UniqueUserConstraints;
 import vn.thanhtuanle.common.util.JwtUtil;
 import vn.thanhtuanle.common.util.Sleeper;
 import vn.thanhtuanle.security.LoginAttemptService;
@@ -59,6 +61,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.Semaphore;
+import java.util.function.Supplier;
 
 @Service
 @RequiredArgsConstructor
@@ -191,7 +194,7 @@ public class AuthService {
         AuthResponse tokens;
         try {
             GoogleMatch match = googleAccount(google);
-            tokens = transactionTemplate.execute(status -> startGoogleSession(match, google, meta));
+            tokens = inGoogleSessionTransaction(() -> startGoogleSession(match, google, meta));
         } catch (AppException e) {
             // The transaction has rolled back and released the row lock: the audit (REQUIRES_NEW) waits for a pooled
             // connection of its own, and must not keep the user locked while it does.
@@ -201,6 +204,18 @@ public class AuthService {
 
         loginAttemptService.record(google.email(), meta, true, null);
         return tokens;
+    }
+
+    /**
+     * Runs a Google sign-in's writes in their transaction. A unique index on users that refuses them (two first sign-ins
+     * for one new account racing, or a Google id linked meanwhile) is a refusal with its reason, like any other.
+     */
+    private AuthResponse inGoogleSessionTransaction(Supplier<AuthResponse> writes) {
+        try {
+            return transactionTemplate.execute(status -> writes.get());
+        } catch (DataIntegrityViolationException e) {
+            throw UniqueUserConstraints.toErrorCode(e).map(AppException::new).orElseThrow(() -> e);
+        }
     }
 
     /** The account a Google identity signs in to: found by its Google id, by its email, or none (a new account). */
@@ -361,7 +376,8 @@ public class AuthService {
     private User newAccount(GoogleIdentity google) {
         var role = roleRepository.findByName(Role.USER.getValue())
                 .orElseThrow(() -> new AppException(ErrorCode.UNCATEGORIZED_EXCEPTION));
-        User user = userRepository.save(User.builder()
+        // Flushed now, so a unique index that refuses the new account does so here, inside the transaction.
+        User user = userRepository.saveAndFlush(User.builder()
                 .name(google.name())
                 .username(google.email())
                 .email(google.email())

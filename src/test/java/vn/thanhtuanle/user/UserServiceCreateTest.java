@@ -55,7 +55,7 @@ class UserServiceCreateTest {
         userService.create(req);
 
         ArgumentCaptor<User> cap = ArgumentCaptor.forClass(User.class);
-        verify(userRepository).save(cap.capture());
+        verify(userRepository).saveAndFlush(cap.capture());
         User saved = cap.getValue();
         assertThat(saved.getUsername()).isEqualTo("newuser");
         assertThat(saved.getEmail()).isEqualTo("new@example.io");
@@ -71,7 +71,7 @@ class UserServiceCreateTest {
         assertThatThrownBy(() -> userService.create(req))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USERNAME_INVALID));
-        verify(userRepository, never()).save(any());
+        verify(userRepository, never()).saveAndFlush(any());
     }
 
     @Test
@@ -81,7 +81,7 @@ class UserServiceCreateTest {
         assertThatThrownBy(() -> userService.create(req))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USERNAME_EXISTED));
-        verify(userRepository, never()).save(any());
+        verify(userRepository, never()).saveAndFlush(any());
     }
 
     @Test
@@ -92,7 +92,7 @@ class UserServiceCreateTest {
         assertThatThrownBy(() -> userService.create(req))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.EMAIL_INVALID));
-        verify(userRepository, never()).save(any());
+        verify(userRepository, never()).saveAndFlush(any());
     }
 
     @Test
@@ -103,7 +103,7 @@ class UserServiceCreateTest {
         assertThatThrownBy(() -> userService.create(req))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.EMAIL_EXISTED));
-        verify(userRepository, never()).save(any());
+        verify(userRepository, never()).saveAndFlush(any());
     }
 
     @Test
@@ -115,7 +115,7 @@ class UserServiceCreateTest {
         assertThatThrownBy(() -> userService.create(req))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.PASSWORD_INVALID));
-        verify(userRepository, never()).save(any());
+        verify(userRepository, never()).saveAndFlush(any());
     }
 
     @Test
@@ -132,7 +132,7 @@ class UserServiceCreateTest {
         assertThatThrownBy(() -> userService.create(req))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.ROLE_NOT_ASSIGNABLE));
-        verify(userRepository, never()).save(any());
+        verify(userRepository, never()).saveAndFlush(any());
     }
 
     @Test
@@ -147,6 +147,6 @@ class UserServiceCreateTest {
         assertThatThrownBy(() -> userService.create(req))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.ROLE_NOT_EXISTED));
-        verify(userRepository, never()).save(any());
+        verify(userRepository, never()).saveAndFlush(any());
     }
 }

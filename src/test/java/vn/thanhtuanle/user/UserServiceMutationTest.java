@@ -84,7 +84,7 @@ class UserServiceMutationTest {
 
         assertThat(u.getName()).isEqualTo("Bob");
         assertThat(u.getEmail()).isEqualTo("bob@example.io");
-        verify(userRepository).save(u);
+        verify(userRepository).saveAndFlush(u);
     }
 
     @Test
@@ -96,7 +96,7 @@ class UserServiceMutationTest {
         assertThatThrownBy(() -> userService.update(id, req(null, "dupe@example.io", null)))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.EMAIL_EXISTED));
-        verify(userRepository, never()).save(any());
+        verify(userRepository, never()).saveAndFlush(any());
     }
 
     @Test
@@ -107,7 +107,7 @@ class UserServiceMutationTest {
         assertThatThrownBy(() -> userService.update(currentUserId, req(null, null, UserStatus.DISABLED.getValue())))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USER_SELF_MODIFY));
-        verify(userRepository, never()).save(any());
+        verify(userRepository, never()).saveAndFlush(any());
     }
 
     @Test
@@ -118,7 +118,7 @@ class UserServiceMutationTest {
         assertThatThrownBy(() -> userService.update(id, req("x", null, null)))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USER_PROTECTED));
-        verify(userRepository, never()).save(any());
+        verify(userRepository, never()).saveAndFlush(any());
     }
 
     @Test

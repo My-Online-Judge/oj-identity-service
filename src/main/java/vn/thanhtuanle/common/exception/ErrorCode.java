@@ -27,6 +27,7 @@ public enum ErrorCode implements ErrorCodeSpec {
     USER_NOT_FOUND("User not found", HttpStatus.NOT_FOUND),
     USERNAME_EXISTED("Username already exists", HttpStatus.CONFLICT),
     EMAIL_EXISTED("Email already exists", HttpStatus.CONFLICT),
+    GOOGLE_ACCOUNT_EXISTED("This Google account is already linked to another account", HttpStatus.CONFLICT),
     USER_PROTECTED("This is a protected system account and cannot be modified", HttpStatus.CONFLICT),
     ROLE_NOT_ASSIGNABLE("This role cannot be assigned to a user", HttpStatus.CONFLICT),
     USER_SELF_MODIFY("You cannot change your own roles, status, or delete your own account", HttpStatus.CONFLICT),

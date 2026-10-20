@@ -113,7 +113,8 @@ public class UserService {
                 .enabledMfa(false)
                 .roles(roles)
                 .build();
-        userRepository.save(user);
+        // Flushed now: V6's unique indexes (usernames and emails in any case) refuse a taken one here, as a 409.
+        userRepository.saveAndFlush(user);
         log.info("Created user {}", username);
         return userMapper.toResponse(user);
     }
@@ -140,7 +141,8 @@ public class UserService {
             assertNotSelf(id);
             user.setStatus(activeOrDisabled(req.getStatus()));
         }
-        userRepository.save(user);
+        // Flushed now: V6's unique index refuses an email another account has in any case, as a 409.
+        userRepository.saveAndFlush(user);
         // The edit form can disable too; like updateStatus, that must end the user's sessions now.
         if (req.getStatus() != null && user.getStatus() != UserStatus.ACTIVE.getValue()) {
             sessionRevoker.revokeAccessTokensAfterCommit(List.of(id));
