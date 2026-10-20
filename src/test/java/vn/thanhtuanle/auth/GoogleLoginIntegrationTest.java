@@ -17,13 +17,18 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.web.client.RestTemplate;
 import vn.thanhtuanle.auth.dto.ExchangeTokenResponse;
+import vn.thanhtuanle.common.enums.UserStatus;
 import vn.thanhtuanle.entity.LoginAttempt;
 import vn.thanhtuanle.entity.Role;
+import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.security.LoginAttemptRepository;
 import vn.thanhtuanle.user.RoleRepository;
+import vn.thanhtuanle.user.UserRepository;
 
 import java.time.Instant;
 import java.util.Date;
+import java.util.HashSet;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -48,6 +53,7 @@ class GoogleLoginIntegrationTest {
     @Autowired MockMvc mockMvc;
     @Autowired LoginAttemptRepository loginAttemptRepository;
     @Autowired RoleRepository roleRepository;
+    @Autowired UserRepository userRepository;
 
     @Value("${spring.security.oauth2.client.registration.google.client-id}")
     String googleClientId;
@@ -89,6 +95,22 @@ class GoogleLoginIntegrationTest {
                 .andReturn();
     }
 
+    /** An account an admin created: a password, no Google id. */
+    private User account(String email, UserStatus status) {
+        String username = "u_" + UUID.randomUUID().toString().substring(0, 8);
+        return userRepository.save(User.builder().username(username).name(username).email(email)
+                .password("{noop}unused").status(status.getValue()).roles(new HashSet<>()).build());
+    }
+
+    /** Every account whose email is this one, whatever its case. */
+    private List<User> accountsWithEmail(String email) {
+        return userRepository.findAll().stream().filter(u -> email.equalsIgnoreCase(u.getEmail())).toList();
+    }
+
+    private static String uniqueEmail(String domain) {
+        return "user." + UUID.randomUUID().toString().substring(0, 8) + "@" + domain;
+    }
+
     private static void assertSignedIn(MvcResult result) {
         assertThat(result.getResponse().getRedirectedUrl()).isEqualTo(APP + "/problems?login=ok");
         assertThat(result.getResponse().getCookie("accessToken").getValue()).isNotBlank();
@@ -108,5 +130,45 @@ class GoogleLoginIntegrationTest {
         // The audit kept what fits; it never fails the login it records.
         assertThat(loginAttemptRepository.findAll()).extracting(LoginAttempt::getUsername)
                 .contains(email.substring(0, 64));
+    }
+
+    @Test
+    void anEmailInAnotherCaseSignsInToTheSameAccount() throws Exception {
+        String email = uniqueEmail("example.com");
+        User account = account(email.toUpperCase(), UserStatus.ACTIVE);
+        String sub = "sub-" + UUID.randomUUID();
+        googleSignsIn(identity(sub, email).claim("hd", "example.com"));
+
+        assertSignedIn(callback());
+        assertThat(accountsWithEmail(email)).singleElement().satisfies(u -> {
+            assertThat(u.getId()).isEqualTo(account.getId());
+            assertThat(u.getGoogleId()).isEqualTo(sub);
+        });
+    }
+
+    /** V6 lets a soft-deleted account keep the email of a live one: the live one signs in. */
+    @Test
+    void aLiveAndADeletedAccountWithTheEmail_signInToTheLiveOne() throws Exception {
+        String email = uniqueEmail("example.com");
+        User deleted = account(email, UserStatus.DELETED);
+        User live = account(email, UserStatus.ACTIVE);
+        String sub = "sub-" + UUID.randomUUID();
+        googleSignsIn(identity(sub, email).claim("hd", "example.com"));
+
+        assertSignedIn(callback());
+        assertThat(userRepository.findById(live.getId()).orElseThrow().getGoogleId()).isEqualTo(sub);
+        assertThat(userRepository.findById(deleted.getId()).orElseThrow().getGoogleId()).isNull();
+        assertThat(accountsWithEmail(email)).hasSize(2);
+    }
+
+    @Test
+    void aMatchOnlyOnADeletedAccountIsBlocked_andCreatesNothing() throws Exception {
+        String email = uniqueEmail("gmail.com");
+        account(email, UserStatus.DELETED);
+        googleSignsIn(identity("sub-" + UUID.randomUUID(), email));
+
+        assertThat(callback().getResponse().getRedirectedUrl())
+                .isEqualTo(APP + "/problems?login=failed&reason=USER_BLOCKED");
+        assertThat(accountsWithEmail(email)).hasSize(1);
     }
 }

@@ -43,8 +43,12 @@ public class GoogleIdTokenVerifier {
         this.clock = clock;
     }
 
-    /** Who signed in. {@code emailVerified} is Google's {@code email_verified}; false when absent. */
-    public record GoogleIdentity(String sub, String email, boolean emailVerified, String name, String picture) {
+    /**
+     * Who signed in. {@code emailVerified} is Google's {@code email_verified}; false when absent. {@code hd} is the
+     * Workspace domain of a Workspace account, null for a consumer Google account.
+     */
+    public record GoogleIdentity(String sub, String email, boolean emailVerified, String name, String picture,
+                                 String hd) {
     }
 
     public GoogleIdentity verify(String idToken, String expectedNonce) {
@@ -70,7 +74,7 @@ public class GoogleIdTokenVerifier {
                 throw invalid("subject or email missing");
             }
             return new GoogleIdentity(sub, email, isTrue(claims.getClaim("email_verified")),
-                    claims.getStringClaim("name"), claims.getStringClaim("picture"));
+                    claims.getStringClaim("name"), claims.getStringClaim("picture"), claims.getStringClaim("hd"));
         } catch (AppException e) {
             throw e;
         } catch (Exception e) {

@@ -108,17 +108,25 @@ class AuthServiceGoogleTest {
 
     /** The id token Google's token endpoint returns for this login. */
     private static String idToken(boolean emailVerified) {
-        return new PlainJWT(new JWTClaimsSet.Builder()
+        return idToken(emailVerified, EMAIL, null);
+    }
+
+    /** The same, for this email; {@code hd} is the Workspace domain claim (null: a consumer Google account). */
+    private static String idToken(boolean emailVerified, String email, String hd) {
+        JWTClaimsSet.Builder claims = new JWTClaimsSet.Builder()
                 .issuer("https://accounts.google.com")
                 .audience(CLIENT_ID)
                 .subject(SUB)
                 .expirationTime(Date.from(NOW.plusSeconds(3600)))
                 .claim("nonce", NONCE)
-                .claim("email", EMAIL)
+                .claim("email", email)
                 .claim("email_verified", emailVerified)
                 .claim("name", "Alice")
-                .claim("picture", "https://example.com/alice.png")
-                .build()).serialize();
+                .claim("picture", "https://example.com/alice.png");
+        if (hd != null) {
+            claims.claim("hd", hd);
+        }
+        return new PlainJWT(claims.build()).serialize();
     }
 
     private void googleAnswers(String idToken) {
@@ -128,7 +136,11 @@ class AuthServiceGoogleTest {
     }
 
     private User account(String googleId) {
-        User u = User.builder().username(EMAIL).email(EMAIL).googleId(googleId)
+        return account(googleId, EMAIL);
+    }
+
+    private static User account(String googleId, String email) {
+        User u = User.builder().username(email).email(email).googleId(googleId)
                 .status(CommonStatus.ACTIVE.getValue()).build();
         u.setId(UUID.randomUUID());
         return u;
@@ -136,10 +148,29 @@ class AuthServiceGoogleTest {
 
     /** An existing account with this email; the session's writes find it again under the row lock. */
     private User existingAccount(String googleId) {
-        User u = account(googleId);
-        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(u));
+        return existingAccount(googleId, EMAIL);
+    }
+
+    private User existingAccount(String googleId, String email) {
+        User u = account(googleId, email);
+        when(userRepository.findLiveByEmail(email)).thenReturn(Optional.of(u));
         when(userRepository.lockById(u.getId())).thenReturn(Optional.of(u));
         return u;
+    }
+
+    private void assertLoginFailsWith(ErrorCode expected) {
+        assertThatThrownBy(() -> authService.authenticateGoogleUser(CODE, VERIFIER, NONCE, META))
+                .isInstanceOfSatisfying(AppException.class, e -> assertThat(e.getErrorCode()).isEqualTo(expected));
+    }
+
+    /** The login is refused with this code, writes nothing, and is audited once its transaction has rolled back. */
+    private void assertRefusedAndAudited(ErrorCode code, String auditedEmail) {
+        assertLoginFailsWith(code);
+        verify(userRepository, never()).save(any());
+        verifyNoInteractions(tokenRepository, jwtUtil);
+        InOrder order = inOrder(transactionManager, loginAttemptService);
+        order.verify(transactionManager).rollback(any());
+        order.verify(loginAttemptService).record(auditedEmail, META, false, code.name());
     }
 
     private void mints(User u) {
@@ -293,7 +324,8 @@ class AuthServiceGoogleTest {
 
     @Test
     void accountWithoutGoogleId_isLinked() {
-        googleAnswers(idToken(true));
+        // A Workspace account (hd): Google is authoritative for its address.
+        googleAnswers(idToken(true, EMAIL, "example.com"));
         User u = existingAccount(null);
         mints(u);
 
@@ -308,9 +340,71 @@ class AuthServiceGoogleTest {
     }
 
     @Test
+    void aGmailAccountWithoutGoogleId_isLinked_whateverTheCase() {
+        googleAnswers(idToken(true, "Alice@GMail.com", null));
+        User u = existingAccount(null, "Alice@GMail.com");
+        mints(u);
+
+        authService.authenticateGoogleUser(CODE, VERIFIER, NONCE, META);
+
+        assertThat(u.getGoogleId()).isEqualTo(SUB);
+        verify(userRepository).save(u);
+    }
+
+    /**
+     * Google vouches for an address only on gmail.com and on Workspace domains (hd). Elsewhere email_verified may date
+     * from when the Google account was made, and the address may have changed hands since: an existing password account
+     * is not handed to whoever holds such a Google account. Creating a new account (no match) is unaffected.
+     */
+    @Test
+    void anAddressGoogleIsNotAuthoritativeFor_isNotLinked() {
+        googleAnswers(idToken(true, EMAIL, null));
+        User u = existingAccount(null);
+
+        assertRefusedAndAudited(ErrorCode.GOOGLE_LINK_NOT_ALLOWED, EMAIL);
+        assertThat(u.getGoogleId()).isNull();
+        assertThat(ErrorCode.GOOGLE_LINK_NOT_ALLOWED.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    void aBlankHostedDomain_isNotAuthoritative() {
+        googleAnswers(idToken(true, EMAIL, " "));
+        User u = existingAccount(null);
+
+        assertRefusedAndAudited(ErrorCode.GOOGLE_LINK_NOT_ALLOWED, EMAIL);
+        assertThat(u.getGoogleId()).isNull();
+    }
+
+    /** Found by email, then changed (an admin edited the email) before the lock: the locked row is not that account. */
+    @Test
+    void anAccountWhoseEmailChangedBeforeTheLock_isNotLinked() {
+        googleAnswers(idToken(true, EMAIL, "example.com"));
+        User found = account(null);
+        User locked = account(null, "someone.else@example.com");
+        locked.setId(found.getId());
+        when(userRepository.findLiveByEmail(EMAIL)).thenReturn(Optional.of(found));
+        when(userRepository.lockById(found.getId())).thenReturn(Optional.of(locked));
+
+        assertRefusedAndAudited(ErrorCode.USER_NOT_EXISTED, EMAIL);
+        assertThat(locked.getGoogleId()).isNull();
+    }
+
+    /** Only a soft-deleted account has the email: blocked as before, and no new account takes its place. */
+    @Test
+    void aMatchOnlyOnADeletedAccount_isBlocked_andCreatesNothing() {
+        googleAnswers(idToken(true));
+        when(userRepository.existsByEmailIgnoreCase(EMAIL)).thenReturn(true);
+
+        assertLoginFailsWith(ErrorCode.USER_BLOCKED);
+        verify(userRepository, never()).save(any());
+        verifyNoInteractions(roleRepository, tokenRepository, jwtUtil);
+        verify(loginAttemptService).record(EMAIL, META, false, "USER_BLOCKED");
+    }
+
+    @Test
     void newVerifiedUser_isCreated() {
         googleAnswers(idToken(true));
-        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.empty());
+        when(userRepository.findLiveByEmail(EMAIL)).thenReturn(Optional.empty());
         Role userRole = Role.builder().name("USER").build();
         when(roleRepository.findByName("USER")).thenReturn(Optional.of(userRole));
         UUID newId = UUID.randomUUID();
@@ -345,7 +439,7 @@ class AuthServiceGoogleTest {
 
     @Test
     void googleLogin_locksTheUserRowBeforeReplacingItsTokens() {
-        googleAnswers(idToken(true));
+        googleAnswers(idToken(true, EMAIL, "example.com"));
         User u = existingAccount(null);
         mints(u);
 
@@ -356,7 +450,7 @@ class AuthServiceGoogleTest {
         // before it). The call to Google holds no transaction.
         InOrder order = inOrder(restTemplate, userRepository, transactionManager, tokenRepository);
         order.verify(restTemplate).postForEntity(eq(TOKEN_URI), any(HttpEntity.class), eq(ExchangeTokenResponse.class));
-        order.verify(userRepository).findByEmail(EMAIL);
+        order.verify(userRepository).findLiveByEmail(EMAIL);
         order.verify(transactionManager).getTransaction(any());
         order.verify(userRepository).lockById(u.getId());
         order.verify(tokenRepository).deleteAllByUserId(u.getId());

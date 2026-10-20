@@ -54,6 +54,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -166,9 +167,10 @@ public class AuthService {
 
     /**
      * Completes a Google sign-in: exchanges the code (with its PKCE verifier) for Google's id token, which must carry
-     * this attempt's nonce, and signs in the account with that email. An unverified email is refused before any
-     * account is looked at. An account already linked to another Google id is refused; one with none is linked; with no
-     * account, one is created.
+     * this attempt's nonce, and signs in the live account with that email (in any case). An unverified email is refused
+     * before any account is looked at. An account already linked to another Google id is refused; one with none is
+     * linked, if Google is authoritative for the address; with no account, one is created. An email that only a
+     * soft-deleted account has is blocked.
      *
      * <p>Not {@code @Transactional}: the call to Google holds neither a transaction nor a pooled connection. The account
      * and token writes run in one short transaction, under the user's row lock, like every other token change. The
@@ -183,9 +185,9 @@ public class AuthService {
             throw new AppException(ErrorCode.GOOGLE_EMAIL_UNVERIFIED);
         }
 
-        Optional<UUID> accountId = userRepository.findByEmail(google.email()).map(User::getId);
         AuthResponse tokens;
         try {
+            Optional<UUID> accountId = googleAccount(google);
             tokens = transactionTemplate.execute(status -> startGoogleSession(accountId, google, meta));
         } catch (AppException e) {
             // The transaction has rolled back and released the row lock: the audit (REQUIRES_NEW) waits for a pooled
@@ -196,6 +198,19 @@ public class AuthService {
 
         loginAttemptService.record(google.email(), meta, true, null);
         return tokens;
+    }
+
+    /**
+     * The live account with the Google email, in any case (read outside the transaction; only its id is kept), or none
+     * for a new account. A soft-deleted account with that email blocks the sign-in, as it did before soft-deleted rows
+     * stopped counting towards the email's uniqueness: its owner does not get a fresh account by signing in again.
+     */
+    private Optional<UUID> googleAccount(GoogleIdentity google) {
+        Optional<UUID> live = userRepository.findLiveByEmail(google.email()).map(User::getId);
+        if (live.isEmpty() && userRepository.existsByEmailIgnoreCase(google.email())) {
+            throw new AppException(ErrorCode.USER_BLOCKED);
+        }
+        return live;
     }
 
     /** The token request: the authorization code plus the PKCE verifier. Returns Google's id token. */
@@ -273,10 +288,23 @@ public class AuthService {
                 .build();
     }
 
-    /** The account with the Google email, locked. Linked to another Google id: refused. Linked to none: linked now. */
+    /**
+     * The account with the Google email, locked. Linked to another Google id: refused. Linked to none: linked now, if
+     * Google is authoritative for the address. The row as locked must still have that email: one changed since it was
+     * found is not the account the email named.
+     */
     private User lockedAccount(UUID id, GoogleIdentity google) {
         User user = userRepository.lockById(id).orElseThrow(() -> new AppException(ErrorCode.USER_NOT_EXISTED));
+        if (!google.email().equalsIgnoreCase(user.getEmail())) {
+            log.warn("Google login refused: user {} changed its email while the login was finding it", user.getId());
+            throw new AppException(ErrorCode.USER_NOT_EXISTED);
+        }
         if (user.getGoogleId() == null) {
+            if (!googleIsAuthoritativeFor(google)) {
+                log.warn("Google login refused: user {} is not linked, and Google does not vouch for its address",
+                        user.getId());
+                throw new AppException(ErrorCode.GOOGLE_LINK_NOT_ALLOWED);
+            }
             user.setGoogleId(google.sub());
             if (user.getAvatar() == null)
                 user.setAvatar(google.picture());
@@ -285,6 +313,16 @@ public class AuthService {
             throw new AppException(ErrorCode.GOOGLE_ACCOUNT_MISMATCH);
         }
         return user;
+    }
+
+    /**
+     * Google is authoritative for an address only on gmail.com and for Workspace accounts ({@code hd}). Elsewhere,
+     * {@code email_verified} may date from when the Google account was made, and the address may have changed hands
+     * since, so it cannot hand over an existing account.
+     */
+    private static boolean googleIsAuthoritativeFor(GoogleIdentity google) {
+        return google.email().toLowerCase(Locale.ROOT).endsWith("@gmail.com")
+                || (google.hd() != null && !google.hd().isBlank());
     }
 
     private User newAccount(GoogleIdentity google) {

@@ -15,6 +15,7 @@ public enum ErrorCode implements ErrorCodeSpec {
     GOOGLE_EMAIL_UNVERIFIED("Google account email is not verified", HttpStatus.FORBIDDEN),
     GOOGLE_ACCOUNT_MISMATCH("This email is linked to a different Google account", HttpStatus.FORBIDDEN),
     GOOGLE_ID_TOKEN_INVALID("Google sign-in could not be verified", HttpStatus.UNAUTHORIZED),
+    GOOGLE_LINK_NOT_ALLOWED("This email can't be linked to Google automatically; sign in with your password", HttpStatus.FORBIDDEN),
     CURRENT_PASSWORD_INCORRECT("Current password is incorrect", HttpStatus.BAD_REQUEST),
     ROLE_NOT_EXISTED("Role not found", HttpStatus.NOT_FOUND),
     PERMISSION_NOT_EXISTED("One or more permissions do not exist", HttpStatus.BAD_REQUEST),

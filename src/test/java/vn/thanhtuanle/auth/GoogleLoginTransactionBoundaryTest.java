@@ -95,6 +95,8 @@ class GoogleLoginTransactionBoundaryTest {
                 .claim("nonce", NONCE)
                 .claim("email", email)
                 .claim("email_verified", true)
+                // A Workspace account: Google is authoritative for its address, so an existing account may be linked.
+                .claim("hd", "example.com")
                 .build()).serialize();
         return ResponseEntity.ok(ExchangeTokenResponse.builder().idToken(idToken).build());
     }

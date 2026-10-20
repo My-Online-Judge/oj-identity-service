@@ -22,6 +22,16 @@ public interface UserRepository extends JpaRepository<User, UUID>, JpaSpecificat
 
     Optional<User> findByEmail(String email);
 
+    /**
+     * The live account (status not 2, soft-deleted) with this email, whatever its case: the rows identity's V6 unique
+     * index {@code ux_users_email_lower} covers, so there is at most one.
+     */
+    @Query("select u from User u where lower(u.email) = lower(:email) and u.status <> 2")
+    Optional<User> findLiveByEmail(@Param("email") String email);
+
+    /** Any account, live or not, with this email in any case. */
+    boolean existsByEmailIgnoreCase(String email);
+
     long countByRoles_Id(UUID roleId);
 
     @Query("select u.id from User u join u.roles r where r.id = :roleId")

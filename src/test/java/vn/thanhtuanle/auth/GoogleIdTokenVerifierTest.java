@@ -70,7 +70,15 @@ class GoogleIdTokenVerifierTest {
         GoogleIdTokenVerifier.GoogleIdentity identity = verifier.verify(plain(googleClaims()), NONCE);
 
         assertThat(identity).isEqualTo(new GoogleIdTokenVerifier.GoogleIdentity(
-                "google-sub-1", "alice@example.com", true, "Alice", "https://example.com/alice.png"));
+                "google-sub-1", "alice@example.com", true, "Alice", "https://example.com/alice.png", null));
+    }
+
+    /** {@code hd}: the account is a Workspace account of that domain, so Google is authoritative for its address. */
+    @Test
+    void readsTheWorkspaceDomain() {
+        assertThat(verifier.verify(plain(googleClaims().claim("hd", "example.edu.vn")), NONCE).hd())
+                .isEqualTo("example.edu.vn");
+        assertRejected(plain(googleClaims().claim("hd", List.of("example.edu.vn"))));
     }
 
     @Test
