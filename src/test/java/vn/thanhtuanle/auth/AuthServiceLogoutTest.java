@@ -15,6 +15,7 @@ import vn.thanhtuanle.repository.TokenRepository;
 import vn.thanhtuanle.user.UserRepository;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -32,6 +33,8 @@ class AuthServiceLogoutTest {
     private TokenRepository tokenRepository;
     @Mock
     private TokenBlocklist tokenBlocklist;
+    @Mock
+    private SessionRevoker sessionRevoker;
     @InjectMocks
     private AuthService authService;
 
@@ -52,6 +55,7 @@ class AuthServiceLogoutTest {
         String token = "current.access.token";
         authenticateAs("alice@example.com", token);
         User user = User.builder().username("alice@example.com").build();
+        user.setId(UUID.randomUUID());
         when(userRepository.findByUsername("alice@example.com")).thenReturn(Optional.of(user));
         when(jwtUtil.extractJti(token)).thenReturn("jti-current");
         when(jwtUtil.getRemainingTtlMillis(token)).thenReturn(840_000L);
@@ -77,5 +81,23 @@ class AuthServiceLogoutTest {
 
         // Existing behaviour preserved: the DB-stored tokens (incl. refresh) are still cleared.
         verify(tokenRepository).deleteAllByUserId(userId);
+    }
+
+    @Test
+    void logout_writesTheRevocationCutoff() {
+        String token = "current.access.token";
+        authenticateAs("alice@example.com", token);
+        UUID userId = UUID.randomUUID();
+        User user = User.builder().username("alice@example.com").build();
+        user.setId(userId);
+        when(userRepository.findByUsername("alice@example.com")).thenReturn(Optional.of(user));
+        when(jwtUtil.extractJti(token)).thenReturn("jti-current");
+        when(jwtUtil.getRemainingTtlMillis(token)).thenReturn(840_000L);
+
+        authService.logout();
+
+        // Logout ends every device's session, not only this one: access tokens the user holds elsewhere
+        // (minted before now) are stripped by the gateway once the transaction commits.
+        verify(sessionRevoker).revokeAccessTokensAfterCommit(List.of(userId));
     }
 }

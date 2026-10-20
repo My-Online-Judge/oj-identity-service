@@ -36,16 +36,26 @@ import vn.thanhtuanle.user.dto.UserResponse;
 import vn.thanhtuanle.user.mapper.UserMapper;
 
 import java.security.SecureRandom;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class AuthService {
+
+    /**
+     * A refresh token presented again this soon after it was rotated is a concurrent request (several tabs
+     * refreshing at once), not theft: it gets 200 and nothing new. Later it is reuse.
+     */
+    public static final Duration REUSE_GRACE = Duration.ofSeconds(10);
 
     private final UserRepository userRepository;
     private final JwtUtil jwtUtil;
@@ -57,6 +67,11 @@ public class AuthService {
     private final PasswordEncoder passwordEncoder;
     private final LoginRateLimiter loginRateLimiter;
     private final LoginAttemptService loginAttemptService;
+    private final SessionRevoker sessionRevoker;
+    private final Clock clock;
+
+    @Value("${application.security.jwt.refresh-token.expiration}")
+    private long refreshTokenTtlMillis;
 
     @Value("${spring.security.oauth2.client.registration.google.client-id}")
     private String clientId;
@@ -263,7 +278,13 @@ public class AuthService {
         tokenRepository.deleteAllByUserId(user.getId());
     }
 
-    @Transactional
+    /**
+     * Rotates the refresh token: the presented one is marked rotated and a new access and refresh token are issued.
+     * Returns both tokens, or both {@code null} when a concurrent refresh already rotated this token (nothing issued).
+     * A rotated token presented again after {@link #REUSE_GRACE} means it was copied: every session of the user ends.
+     * Those deletes must commit even though the request answers 401, hence {@code dontRollbackOn}.
+     */
+    @Transactional(dontRollbackOn = AppException.class)
     public AuthResponse refreshAccessToken(String refreshToken, ClientMeta meta) {
         if (refreshToken == null || refreshToken.isBlank()) {
             throw new AppException(ErrorCode.INVALID_CREDENTIALS);
@@ -284,6 +305,18 @@ public class AuthService {
             throw new AppException(ErrorCode.INVALID_CREDENTIALS);
         }
 
+        LocalDateTime now = LocalDateTime.now(clock);
+        if (stored.getRotatedAt() != null) {
+            if (!now.isAfter(stored.getRotatedAt().plus(REUSE_GRACE))) {
+                return AuthResponse.builder().build();
+            }
+            UUID uid = stored.getUser().getId();
+            tokenRepository.deleteAllByUserId(uid);
+            sessionRevoker.revokeAccessTokensAfterCommit(List.of(uid));
+            log.warn("Refresh token reuse for user {}: every session ended", uid);
+            throw new AppException(ErrorCode.REFRESH_TOKEN_REUSED);
+        }
+
         String username = jwtUtil.extractUsername(refreshToken);
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new AppException(ErrorCode.USER_NOT_EXISTED));
@@ -294,16 +327,25 @@ public class AuthService {
             throw new AppException(ErrorCode.USER_BLOCKED);
         }
 
+        // Conditional on rotated_at still being null: of two refreshes racing with the same token, one wins.
+        if (tokenRepository.markRotated(stored.getId(), now) == 0) {
+            return AuthResponse.builder().build();
+        }
+
         String newAccessToken = jwtUtil.generateToken(user);
+        String newRefreshToken = jwtUtil.generateRefreshToken(user);
         // One ACCESS row per live session: at a 15-minute TTL, appending a row per
         // refresh would add ~96 rows/user/day that nothing cleans up until the next login.
         tokenRepository.deleteAllByUserIdAndTokenType(user.getId(), TokenType.ACCESS);
         savedUserToken(user, newAccessToken, TokenType.ACCESS, meta);
-        log.info("Issued new access token via refresh for user: {}", username);
+        savedUserToken(user, newRefreshToken, TokenType.REFRESH, meta);
+        // A rotated row is kept only to recognise reuse, which is moot once the token it held has expired.
+        tokenRepository.deleteRotatedBefore(user.getId(), now.minus(Duration.ofMillis(refreshTokenTtlMillis)));
+        log.info("Rotated the refresh token for user: {}", username);
 
         return AuthResponse.builder()
                 .accessToken(newAccessToken)
-                .refreshToken(refreshToken)
+                .refreshToken(newRefreshToken)
                 .build();
     }
 
@@ -343,6 +385,8 @@ public class AuthService {
         }
 
         revokeAllUserTokens(user);
+        // Every device's access token, not only the caller's: the gateway strips tokens issued before the cutoff.
+        sessionRevoker.revokeAccessTokensAfterCommit(List.of(user.getId()));
         log.info("User logged out successfully");
     }
 

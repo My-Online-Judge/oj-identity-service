@@ -30,7 +30,6 @@ import java.util.Map;
 @Slf4j
 public class AuthController {
 
-    private static final String ACCESS_TOKEN_COOKIE = AuthCookies.ACCESS_TOKEN_COOKIE;
     private static final String REFRESH_TOKEN_COOKIE = AuthCookies.REFRESH_TOKEN_COOKIE;
     private static final String OAUTH_STATE_COOKIE = "oauthState";
     private static final int ACCESS_TOKEN_MAX_AGE = 24 * 60 * 60; // 1 day
@@ -38,6 +37,7 @@ public class AuthController {
     private static final int OAUTH_STATE_MAX_AGE = 5 * 60; // one login round-trip
 
     private final AuthService authService;
+    private final AuthCookies authCookies;
 
     /** Set true in prod (HTTPS) so auth cookies carry the Secure flag. */
     @Value("${app.cookie.secure:false}")
@@ -81,8 +81,7 @@ public class AuthController {
 
         try {
             AuthResponse auth = authService.authenticateGoogleUser(code, ClientMeta.from(httpRequest));
-            addCookie(response, ACCESS_TOKEN_COOKIE, auth.getAccessToken(), ACCESS_TOKEN_MAX_AGE);
-            addCookie(response, REFRESH_TOKEN_COOKIE, auth.getRefreshToken(), REFRESH_TOKEN_MAX_AGE);
+            writeSession(response, auth);
             response.sendRedirect(appBaseUrl + "/problems?login=ok");
         } catch (Exception e) {
             log.warn("Google login failed while exchanging the authorization code", e);
@@ -103,17 +102,15 @@ public class AuthController {
             HttpServletResponse response) {
         AuthResponse auth = authService.authenticateWithPassword(
                 request.getUsername(), request.getPassword(), ClientMeta.from(httpRequest));
-        addCookie(response, ACCESS_TOKEN_COOKIE, auth.getAccessToken(), ACCESS_TOKEN_MAX_AGE);
-        addCookie(response, REFRESH_TOKEN_COOKIE, auth.getRefreshToken(), REFRESH_TOKEN_MAX_AGE);
+        writeSession(response, auth);
         return ApiResponse.success();
     }
 
-    @Operation(summary = "Logout", description = "Logout user and clear cookies")
+    @Operation(summary = "Logout", description = "End every session of the user and clear cookies")
     @PostMapping("/logout")
     public ApiResponse<Void> logout(HttpServletResponse response) {
         authService.logout();
-        addCookie(response, ACCESS_TOKEN_COOKIE, null, 0);
-        addCookie(response, REFRESH_TOKEN_COOKIE, null, 0);
+        authCookies.clearSession(response);
         return ApiResponse.success();
     }
 
@@ -123,7 +120,7 @@ public class AuthController {
         return ApiResponse.success(authService.introspect(request));
     }
 
-    @Operation(summary = "Refresh access token", description = "Exchange a valid refresh token for a new access token, set as an HttpOnly cookie")
+    @Operation(summary = "Refresh access token", description = "Exchange a valid refresh token for a new access and refresh token, set as HttpOnly cookies")
     @PostMapping("/refresh")
     public ApiResponse<Void> refresh(
             @CookieValue(value = REFRESH_TOKEN_COOKIE, required = false) String refreshCookie,
@@ -133,8 +130,12 @@ public class AuthController {
         String refreshToken = refreshCookie != null ? refreshCookie
                 : (body != null ? body.get("refreshToken") : null);
         var authResponse = authService.refreshAccessToken(refreshToken, ClientMeta.from(httpRequest));
-        addCookie(response, ACCESS_TOKEN_COOKIE, authResponse.getAccessToken(), ACCESS_TOKEN_MAX_AGE);
-        // Token material never rides in the response body: the cookie above is the only
+        // No tokens: a concurrent request (another tab) rotated this refresh token a moment ago and its
+        // response carries the new cookies, so this one leaves the browser's cookies alone.
+        if (authResponse.getAccessToken() != null) {
+            writeSession(response, authResponse);
+        }
+        // Token material never rides in the response body: the cookies above are the only
         // thing the caller needs, and putting tokens in JS-readable JSON would defeat the
         // HttpOnly cookie design the moment any XSS can POST here (which auto-refresh-on-401
         // now makes routine, not rare).
@@ -148,7 +149,12 @@ public class AuthController {
         return ApiResponse.success(authService.me());
     }
 
+    private void writeSession(HttpServletResponse response, AuthResponse auth) {
+        authCookies.writeAccess(response, auth.getAccessToken(), ACCESS_TOKEN_MAX_AGE);
+        authCookies.writeRefresh(response, auth.getRefreshToken(), REFRESH_TOKEN_MAX_AGE);
+    }
+
     private void addCookie(HttpServletResponse response, String name, String value, int maxAge) {
-        AuthCookies.write(response, name, value, maxAge, cookieSecure);
+        AuthCookies.write(response, name, value, maxAge, cookieSecure, "/");
     }
 }

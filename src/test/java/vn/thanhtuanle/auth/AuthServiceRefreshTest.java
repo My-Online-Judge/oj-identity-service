@@ -2,10 +2,13 @@ package vn.thanhtuanle.auth;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 import vn.thanhtuanle.auth.dto.AuthResponse;
 import vn.thanhtuanle.common.enums.CommonStatus;
 import vn.thanhtuanle.common.enums.TokenType;
@@ -18,14 +21,21 @@ import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.repository.TokenRepository;
 import vn.thanhtuanle.user.UserRepository;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -33,6 +43,7 @@ import static org.mockito.Mockito.when;
 class AuthServiceRefreshTest {
 
     private static final ClientMeta META = new ClientMeta("1.2.3.4", "device-hash", "agent");
+    private static final long REFRESH_TTL_MILLIS = 259_200_000L;
 
     @Mock
     private UserRepository userRepository;
@@ -42,23 +53,41 @@ class AuthServiceRefreshTest {
     private TokenRepository tokenRepository;
     @Mock
     private TokenBlocklist tokenBlocklist;
+    @Mock
+    private SessionRevoker sessionRevoker;
+    @Spy
+    private Clock clock = Clock.fixed(Instant.parse("2026-10-20T05:00:00Z"), ZoneId.of("Asia/Ho_Chi_Minh"));
     @InjectMocks
     private AuthService authService;
 
+    private final UUID storedId = UUID.randomUUID();
+
     private User arrangeValidRefresh(String refreshToken, UUID userId) {
+        User user = arrangeStoredRefresh(refreshToken, userId);
+        when(tokenRepository.markRotated(storedId, now())).thenReturn(1);
+        when(jwtUtil.generateToken(user)).thenReturn("new.access.token");
+        when(jwtUtil.generateRefreshToken(user)).thenReturn("new.refresh.token");
+        return user;
+    }
+
+    private User arrangeStoredRefresh(String refreshToken, UUID userId) {
         User user = User.builder().username("alice@example.com").status(CommonStatus.ACTIVE.getValue()).build();
         user.setId(userId);
         Token stored = Token.builder().token(TokenHasher.sha256Hex(refreshToken)).tokenType(TokenType.REFRESH).build();
+        stored.setId(storedId);
         when(jwtUtil.isTokenExpired(refreshToken)).thenReturn(false);
         when(tokenRepository.findByToken(TokenHasher.sha256Hex(refreshToken))).thenReturn(Optional.of(stored));
         when(jwtUtil.extractUsername(refreshToken)).thenReturn("alice@example.com");
         when(userRepository.findByUsername("alice@example.com")).thenReturn(Optional.of(user));
-        when(jwtUtil.generateToken(user)).thenReturn("new.access.token");
         return user;
     }
 
+    private LocalDateTime now() {
+        return LocalDateTime.now(clock);
+    }
+
     @Test
-    void refresh_deletesTheOldAccessRowBeforeSavingTheNewOne() {
+    void refresh_deletesTheOldAccessRowBeforeSavingTheNewOnes() {
         UUID userId = UUID.randomUUID();
         arrangeValidRefresh("valid.refresh.token", userId);
 
@@ -67,7 +96,7 @@ class AuthServiceRefreshTest {
         // One live session must leave exactly one ACCESS row behind, not one per refresh.
         InOrder order = inOrder(tokenRepository);
         order.verify(tokenRepository).deleteAllByUserIdAndTokenType(userId, TokenType.ACCESS);
-        order.verify(tokenRepository).save(any(Token.class));
+        order.verify(tokenRepository, times(2)).save(any(Token.class));
     }
 
     @Test
@@ -83,17 +112,42 @@ class AuthServiceRefreshTest {
     }
 
     @Test
-    void refresh_leavesRefreshRowsAlone() {
+    void refresh_rotatesTheRefreshToken() {
         UUID userId = UUID.randomUUID();
         arrangeValidRefresh("valid.refresh.token", userId);
+        ReflectionTestUtils.setField(authService, "refreshTokenTtlMillis", REFRESH_TTL_MILLIS);
 
         AuthResponse response = authService.refreshAccessToken("valid.refresh.token", META);
 
-        verify(tokenRepository, never()).deleteAllByUserIdAndTokenType(userId, TokenType.REFRESH);
-        verify(tokenRepository, never()).deleteAllByUserId(any());
-        // The refresh token is not rotated — the caller keeps using the one it sent.
-        assertThat(response.getRefreshToken()).isEqualTo("valid.refresh.token");
         assertThat(response.getAccessToken()).isEqualTo("new.access.token");
+        assertThat(response.getRefreshToken()).isEqualTo("new.refresh.token");
+        verify(tokenRepository).markRotated(storedId, now());
+        ArgumentCaptor<Token> saved = ArgumentCaptor.forClass(Token.class);
+        verify(tokenRepository, times(2)).save(saved.capture());
+        assertThat(saved.getAllValues())
+                .extracting(Token::getTokenType, Token::getToken)
+                .containsExactlyInAnyOrder(
+                        tuple(TokenType.ACCESS, TokenHasher.sha256Hex("new.access.token")),
+                        tuple(TokenType.REFRESH, TokenHasher.sha256Hex("new.refresh.token")));
+        // Rotated rows are kept for reuse detection only while the token they held could still be presented.
+        verify(tokenRepository).deleteRotatedBefore(userId, now().minus(Duration.ofMillis(REFRESH_TTL_MILLIS)));
+        verify(tokenRepository, never()).deleteAllByUserId(any());
+    }
+
+    @Test
+    void refresh_losingTheRotationRace_issuesNothing() {
+        UUID userId = UUID.randomUUID();
+        arrangeStoredRefresh("valid.refresh.token", userId);
+        // A concurrent refresh rotated the row between our read and our update.
+        when(tokenRepository.markRotated(storedId, now())).thenReturn(0);
+
+        AuthResponse response = authService.refreshAccessToken("valid.refresh.token", META);
+
+        assertThat(response.getAccessToken()).isNull();
+        assertThat(response.getRefreshToken()).isNull();
+        verify(jwtUtil, never()).generateToken(any());
+        verify(tokenRepository, never()).save(any());
+        verify(tokenRepository, never()).deleteAllByUserIdAndTokenType(any(), any());
     }
 
     @Test
@@ -116,6 +170,7 @@ class AuthServiceRefreshTest {
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USER_BLOCKED));
 
         verify(jwtUtil, never()).generateToken(any());
+        verify(tokenRepository, never()).markRotated(any(), any());
         verify(tokenRepository, never()).save(any());
         verify(tokenRepository, never()).deleteAllByUserIdAndTokenType(any(), any());
     }

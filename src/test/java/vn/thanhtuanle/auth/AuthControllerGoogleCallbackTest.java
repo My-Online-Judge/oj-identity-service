@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
@@ -30,6 +31,9 @@ class AuthControllerGoogleCallbackTest {
     @Mock
     AuthService authService;
 
+    @Spy
+    AuthCookies authCookies = new AuthCookies();
+
     @InjectMocks
     AuthController controller;
 
@@ -54,6 +58,7 @@ class AuthControllerGoogleCallbackTest {
         assertThat(response.getRedirectedUrl()).isEqualTo(APP + "/problems?login=ok");
         assertThat(response.getCookie("accessToken").getValue()).isEqualTo("AT");
         assertThat(response.getCookie("refreshToken").getValue()).isEqualTo("RT");
+        assertThat(response.getCookie("refreshToken").getPath()).isEqualTo("/api/v1/auth");
         // The whole point of moving the callback server-side: JS must never read these.
         assertThat(response.getCookie("accessToken").isHttpOnly()).isTrue();
         assertThat(response.getCookie("refreshToken").isHttpOnly()).isTrue();
