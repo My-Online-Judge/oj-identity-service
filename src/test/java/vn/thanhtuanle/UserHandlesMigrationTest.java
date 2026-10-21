@@ -4,6 +4,8 @@ import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.MigrationInfo;
 import org.flywaydb.core.api.CoreMigrationType;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.config.YamlPropertiesFactoryBean;
+import org.springframework.core.io.ClassPathResource;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -125,6 +127,20 @@ class UserHandlesMigrationTest {
         MigrationInfo current = flyway("latest").info().current();
         assertThat(current.getVersion().getVersion()).isEqualTo("8");
         assertThat(current.getType()).isEqualTo(CoreMigrationType.JDBC);
+    }
+
+    /**
+     * V8 is a class, not a .sql file: it must sit under the location the service's Flyway scans. Boot repackages
+     * {@code target/classes} as {@code BOOT-INF/classes}, so this path is the one inside the jar too.
+     */
+    @Test
+    void v8IsUnderTheLocationTheServiceScans() {
+        YamlPropertiesFactoryBean yaml = new YamlPropertiesFactoryBean();
+        yaml.setResources(new ClassPathResource("application.yml"));
+        String location = yaml.getObject().getProperty("spring.flyway.locations");
+
+        assertThat(location).isEqualTo("classpath:db/migration");
+        assertThat(getClass().getClassLoader().getResource("db/migration/V8__user_handles.class")).isNotNull();
     }
 
     private static UUID insertUser(String username, String email, String name, int status, int minutesAfterT0)
