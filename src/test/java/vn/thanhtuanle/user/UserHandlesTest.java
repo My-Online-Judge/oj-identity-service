@@ -33,6 +33,16 @@ class UserHandlesTest {
             "Lê                    | user_le",
             "Zoë Smith-Jones       | zoe_smith_jones",
             "R2-D2                 | r2_d2",
+            "\u00D0\u1EB7ng V\u0103n A   | dang_van_a",
+            "Gu\u00F0r\u00FAn               | gudrun",
+            "\uFF21\uFF4C\uFF49\uFF43\uFF45           | alice",
+            "\uFB01ona                | fiona",
+            "\u0141ukasz \u017B\u00F3\u0142\u0107    | lukasz_zolc",
+            "S\u00F8ren                | soren",
+            "Stra\u00DFe               | strasse",
+            "\u00C6sir \u0152uvre       | aesir_oeuvre",
+            "\u00DE\u00F3r                | thor",
+            "Y\u0131ld\u0131z             | yildiz",
             "..                    | ''",
             "'   '                 | ''",
             "李小龙                  | ''",
@@ -146,5 +156,17 @@ class UserHandlesTest {
         assertThat(HandleAllocator.sourceOf("Nguyen.Van.A@gmail.com", "Nguyễn Văn A")).isEqualTo("Nguyễn Văn A");
         assertThat(HandleAllocator.sourceOf("alice@example.com", null)).isEmpty();
         assertThat(HandleAllocator.sourceOf("alice@example.com", "  ")).isEmpty();
+    }
+
+    /** Some Google accounts carry an address as their name: that part never becomes a public handle. */
+    @Test
+    void anEmailInTheDisplayNameIsLeftOut() {
+        assertThat(UserHandles.base(HandleAllocator.sourceOf("x@gmail.com", "john.doe@gmail.com"))).isEmpty();
+        assertThat(UserHandles.base(HandleAllocator.sourceOf("x@gmail.com", "John Doe (john.doe@gmail.com)")))
+                .isEqualTo("john_doe");
+        assertThat(UserHandles.base(HandleAllocator.sourceOf("x@gmail.com", "Mai a@b.c d@e Lan")))
+                .isEqualTo("mai_lan");
+        assertThat(UserHandles.allocate(HandleAllocator.sourceOf("x@gmail.com", "john.doe@gmail.com"),
+                handle -> false, new Random(1))).matches("user[0-9a-f]{6}");
     }
 }

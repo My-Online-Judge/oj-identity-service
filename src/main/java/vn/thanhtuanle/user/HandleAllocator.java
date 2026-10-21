@@ -4,10 +4,14 @@ import org.springframework.stereotype.Component;
 
 import java.security.SecureRandom;
 import java.util.random.RandomGenerator;
+import java.util.regex.Pattern;
 
 /** Picks a free public handle for a Google account ({@link UserHandles#allocate}) among the live accounts. */
 @Component
 public class HandleAllocator {
+
+    /** Anything shaped like an email address. */
+    private static final Pattern EMAIL_LIKE = Pattern.compile("\\S+@\\S+");
 
     private final UserRepository userRepository;
     private final RandomGenerator random = new SecureRandom();
@@ -28,9 +32,11 @@ public class HandleAllocator {
     /**
      * What a handle is made from: the Google display name, or {@code ""} when it is blank (the handle is then
      * {@code user} + random hex). Never the email: a handle is public, and an address or its local part would tell
-     * anyone how to reach the account's owner. {@code email} is deliberately unused.
+     * anyone how to reach the account's owner. {@code email} is deliberately unused, and an address inside the name
+     * (some Google accounts carry theirs as their name) is left out too.
      */
     public static String sourceOf(String email, String name) {
-        return name == null || name.isBlank() ? "" : name;
+        String withoutAddresses = name == null ? "" : EMAIL_LIKE.matcher(name).replaceAll(" ");
+        return withoutAddresses.isBlank() ? "" : withoutAddresses;
     }
 }

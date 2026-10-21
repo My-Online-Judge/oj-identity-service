@@ -3,6 +3,7 @@ package vn.thanhtuanle.user;
 import java.text.Normalizer;
 import java.util.HexFormat;
 import java.util.Locale;
+import java.util.Map;
 import java.util.function.Predicate;
 import java.util.random.RandomGenerator;
 import java.util.regex.Pattern;
@@ -33,8 +34,16 @@ public final class UserHandles {
     }
 
     /**
-     * The handle a name asks for: lower case, diacritics removed (NFD, combining marks dropped, {@code đ} is
-     * {@code d}), each run of anything outside {@code [a-z0-9]} one {@code _}, no {@code _} at either end, at most
+     * Letters that compatibility decomposition keeps as they are, spelled in {@code [a-z]}: {@code đ} and the
+     * look-alike Eth {@code ð} (which some legacy Vietnamese converters emit) are {@code d}.
+     */
+    private static final Map<Character, String> LETTERS = Map.of(
+            'đ', "d", 'ð', "d", 'ı', "i", 'ł', "l", 'ø', "o",
+            'ß', "ss", 'æ', "ae", 'œ', "oe", 'þ', "th");
+
+    /**
+     * The handle a name asks for: lower case, diacritics removed (NFKD, so fullwidth forms and ligatures become their
+     * letters, combining marks dropped, and {@link #LETTERS} spelled out), each run of anything outside {@code [a-z0-9]} one {@code _}, no {@code _} at either end, at most
      * {@link #MAX_BASE} characters (a {@code _} left at the cut is dropped). Shorter than 3: {@code user_} + it. Empty
      * when nothing usable remains (no name, or only punctuation or other scripts): {@link #allocate} then gives
      * {@code user} + 6 random hex digits.
@@ -43,9 +52,12 @@ public final class UserHandles {
         if (source == null) {
             return "";
         }
-        String folded = MARKS.matcher(Normalizer.normalize(source.toLowerCase(Locale.ROOT), Normalizer.Form.NFD))
-                .replaceAll("")
-                .replace('đ', 'd');
+        String decomposed = MARKS.matcher(Normalizer.normalize(source.toLowerCase(Locale.ROOT), Normalizer.Form.NFKD))
+                .replaceAll("");
+        StringBuilder folded = new StringBuilder(decomposed.length());
+        for (char c : decomposed.toCharArray()) {
+            folded.append(LETTERS.getOrDefault(c, String.valueOf(c)));
+        }
         String handle = trimSeparators(OUTSIDE_RULE.matcher(folded).replaceAll("_"));
         if (handle.length() > MAX_BASE) {
             handle = trimSeparators(handle.substring(0, MAX_BASE));
