@@ -17,6 +17,7 @@ import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.oj.common.web.error.RateLimitedException;
 import vn.thanhtuanle.security.LoginRateLimiter.Attempt;
+import vn.thanhtuanle.security.LoginRateLimiter.PasswordChangeAttempt;
 
 import java.time.Duration;
 import java.util.List;
@@ -115,27 +116,71 @@ class LoginRateLimiterTest {
         assertThat(args.getValue()[3]).isEqualTo("900000");
     }
 
-    /**
-     * A wrong current password is counted, its window started and the lock set at the limit in one atomic step: with
-     * INCR and EXPIRE as two calls, a crash between them would leave a counter that never expires.
-     */
+    @Test
+    void anIpLimitOfZeroRefusesToStart() {
+        assertThatThrownBy(() -> new LoginRateLimiter(redis, registry, 0, 50))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("oj.login.ip-limit (OJ_LOGIN_IP_LIMIT) must be at least 1, was 0");
+    }
+
+    @Test
+    void anAccountLimitBelowOneRefusesToStart() {
+        assertThatThrownBy(() -> new LoginRateLimiter(redis, registry, 30, 0))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("oj.login.account-limit (OJ_LOGIN_ACCOUNT_LIMIT) must be at least 1, was 0");
+        assertThatThrownBy(() -> new LoginRateLimiter(redis, registry, 30, -1))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("oj.login.account-limit (OJ_LOGIN_ACCOUNT_LIMIT) must be at least 1, was -1");
+    }
+
+    @Test
+    void limitsOfOneStart() {
+        assertThatCode(() -> new LoginRateLimiter(redis, registry, 1, 1)).doesNotThrowAnyException();
+    }
+
+    /** A password change takes its place before BCrypt runs: one dimension, its own key, no address lock. */
     @Test
     @SuppressWarnings("unchecked")
-    void aWrongCurrentPasswordIsCountedInOneAtomicStep() {
+    void aPasswordChangeReservesItsPlaceInOneScript() {
         UUID userId = UUID.randomUUID();
+        scriptAnswers(List.of(1L, 3L, 0L));
 
-        limiter.recordPasswordChangeFailure(userId);
+        PasswordChangeAttempt attempt = limiter.reservePasswordChange(userId);
 
         ArgumentCaptor<List<String>> keys = ArgumentCaptor.forClass(List.class);
         ArgumentCaptor<Object[]> args = ArgumentCaptor.forClass(Object[].class);
         verify(redis).execute(any(RedisScript.class), keys.capture(), args.capture());
-        assertThat(keys.getValue()).containsExactly("oj:rl:login:pwchange:" + userId, "oj:rl:lock:pwchange:" + userId);
-        assertThat(args.getValue()).hasSize(4);
+        assertThat(keys.getValue()).containsExactly("oj:rl:lock:pwchange:" + userId, "oj:rl:login:pwchange:" + userId);
+        // limit, window, then the probe's token, its retry and its lock's length
+        assertThat(args.getValue()).hasSize(5);
         assertThat(args.getValue()[0]).isEqualTo("5");
         assertThat(args.getValue()[1]).isEqualTo("300000");
-        assertThat(args.getValue()[3]).isEqualTo("900000");
-        verify(valueOps, never()).increment(anyString());
-        verify(redis, never()).expire(anyString(), any(Duration.class));
+        assertThat((String) args.getValue()[2]).startsWith("probe:");
+        assertThat(args.getValue()[3]).isEqualTo("2000");
+        assertThat(args.getValue()[4]).isEqualTo("60000");
+        assertThat(attempt).isEqualTo(new PasswordChangeAttempt(userId, 3, false, null));
+    }
+
+    @Test
+    void aRefusedPasswordChangeIs429WithItsOwnCode() {
+        scriptAnswers(List.of(0L, 600_000L));
+
+        assertThatThrownBy(() -> limiter.reservePasswordChange(UUID.randomUUID()))
+                .isInstanceOfSatisfying(RateLimitedException.class, e -> {
+                    assertThat(e.getErrorCode()).isEqualTo(ErrorCode.PASSWORD_CHANGE_RATE_LIMITED);
+                    assertThat(e.getRetryAfterSeconds()).isEqualTo(600);
+                });
+    }
+
+    @Test
+    void theWrongCurrentPasswordThatReachesTheLimitLocksFor15Minutes() {
+        UUID userId = UUID.randomUUID();
+
+        limiter.recordPasswordChangeFailure(new PasswordChangeAttempt(userId, 4, false, null));
+        verify(valueOps, never()).set(anyString(), anyString(), any(Duration.class));
+
+        limiter.recordPasswordChangeFailure(new PasswordChangeAttempt(userId, 5, false, null));
+        verify(valueOps).set(eq("oj:rl:lock:pwchange:" + userId), startsWith("fail:"), eq(Duration.ofMinutes(15)));
     }
 
     @Test
@@ -225,10 +270,14 @@ class LoginRateLimiterTest {
                 .doesNotThrowAnyException();
         assertThatCode(() -> limiter.release(new Attempt("alice", "1.2.3.4", 1, 1)))
                 .doesNotThrowAnyException();
-        assertThatCode(() -> limiter.assertPasswordChangeAllowed(userId)).doesNotThrowAnyException();
-        assertThatCode(() -> limiter.recordPasswordChangeFailure(userId)).doesNotThrowAnyException();
+        PasswordChangeAttempt change = limiter.reservePasswordChange(userId);
+        assertThat(change.count()).isZero();
+        assertThatCode(() -> limiter.recordPasswordChangeFailure(new PasswordChangeAttempt(userId, 5, false, null)))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> limiter.releasePasswordChange(new PasswordChangeAttempt(userId, 1, false, null)))
+                .doesNotThrowAnyException();
 
-        assertThat(fallbacks()).isEqualTo(6);
+        assertThat(fallbacks()).isEqualTo(7);
     }
 
     @Test

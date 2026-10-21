@@ -22,6 +22,7 @@ import vn.thanhtuanle.entity.Role;
 import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.repository.TokenRepository;
 import vn.thanhtuanle.security.LoginRateLimiter;
+import vn.thanhtuanle.security.LoginRateLimiter.PasswordChangeAttempt;
 import vn.thanhtuanle.oj.common.web.error.ResourceNotFoundException;
 import vn.thanhtuanle.user.dto.CreateUserRequest;
 import vn.thanhtuanle.user.dto.PublicProfileResponse;
@@ -209,24 +210,34 @@ public class UserService {
 
     /**
      * Change the signed-in user's own password (SYS_ROOT included); every session of theirs ends. Wrong current
-     * passwords are throttled like logins (5 per 5 minutes, then 429 for 15), so a stolen session cannot guess it.
+     * passwords are throttled like logins, so a stolen session cannot guess it: each change takes its place in the
+     * limiter before BCrypt runs (5 per 5 minutes and one probe, then 429), and the fifth failure locks changes for 15
+     * minutes. Only a wrong current password keeps its place; every other outcome hands it back.
      */
     @Transactional
     public void changeOwnPassword(String current, String next) {
         User user = getCurrentUser();
-        loginRateLimiter.assertPasswordChangeAllowed(user.getId());
-        if (!passwordEncoder.matches(current, user.getPassword())) {
-            loginRateLimiter.recordPasswordChangeFailure(user.getId());
-            throw new AppException(ErrorCode.CURRENT_PASSWORD_INCORRECT);
+        PasswordChangeAttempt attempt = loginRateLimiter.reservePasswordChange(user.getId());
+        boolean failed = false;
+        try {
+            if (!passwordEncoder.matches(current, user.getPassword())) {
+                failed = true;
+                loginRateLimiter.recordPasswordChangeFailure(attempt);
+                throw new AppException(ErrorCode.CURRENT_PASSWORD_INCORRECT);
+            }
+            if (next != null && next.equals(current)) {
+                throw new AppException(ErrorCode.PASSWORD_UNCHANGED);
+            }
+            validatePassword(next);
+            user.setPassword(passwordEncoder.encode(next));
+            userRepository.save(user);
+            endSessions(user.getId());
+            log.info("User {} changed their password", user.getUsername());
+        } finally {
+            if (!failed) {
+                loginRateLimiter.releasePasswordChange(attempt);
+            }
         }
-        if (next != null && next.equals(current)) {
-            throw new AppException(ErrorCode.PASSWORD_UNCHANGED);
-        }
-        validatePassword(next);
-        user.setPassword(passwordEncoder.encode(next));
-        userRepository.save(user);
-        endSessions(user.getId());
-        log.info("User {} changed their password", user.getUsername());
     }
 
     /** A new credential invalidates refresh tokens now and live access tokens once the transaction commits. */

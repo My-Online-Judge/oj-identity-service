@@ -15,7 +15,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Redis-backed brute-force lockout for password logins and for the current-password check of a password change.
@@ -184,6 +183,14 @@ public class LoginRateLimiter {
         }
     }
 
+    /**
+     * One password change's place in its counter, as {@link #reservePasswordChange} took it: its ordinal in the window
+     * (0 when it was not counted: Redis was down), whether it went over the limit and locked it (the probe), and the
+     * value it wrote into that lock ({@code null} when it is not the probe).
+     */
+    public record PasswordChangeAttempt(UUID userId, long count, boolean probe, String probeToken) {
+    }
+
     private final StringRedisTemplate redis;
     private final Counter throttled;
     private final Counter fallbacks;
@@ -195,6 +202,9 @@ public class LoginRateLimiter {
     public LoginRateLimiter(StringRedisTemplate redis, MeterRegistry registry,
                             @Value("${oj.login.ip-limit:30}") int ipLimit,
                             @Value("${oj.login.account-limit:50}") int accountLimit) {
+        // A limit of 0 would lock every first failure (IP) or refuse every login (account): a typo, never a policy.
+        requireAtLeastOne("oj.login.ip-limit (OJ_LOGIN_IP_LIMIT)", ipLimit);
+        requireAtLeastOne("oj.login.account-limit (OJ_LOGIN_ACCOUNT_LIMIT)", accountLimit);
         this.redis = redis;
         this.ipLimit = ipLimit;
         this.accountLimit = accountLimit;
@@ -207,6 +217,12 @@ public class LoginRateLimiter {
                 .description("Requests or work that went on without Redis because a Redis call failed (fail-open)")
                 .tag("lookup", "login")
                 .register(registry);
+    }
+
+    private static void requireAtLeastOne(String setting, int value) {
+        if (value < 1) {
+            throw new IllegalStateException(setting + " must be at least 1, was " + value);
+        }
     }
 
     /**
@@ -347,32 +363,70 @@ public class LoginRateLimiter {
     }
 
     /**
-     * Throws 429 PASSWORD_CHANGE_RATE_LIMITED, with Retry-After = what is left of the lock, while this user's password
-     * changes are locked after too many wrong current passwords.
+     * Takes this password change's place in its counter ({@code pwchange:<uid>}, {@link #PASSWORD_CHANGE_LIMIT} per
+     * {@link #WINDOW}) before the current password is checked, with the login's script and one dimension: a burst of
+     * wrong current passwords gets at most the limit and one probe BCrypt checks. Throws 429
+     * PASSWORD_CHANGE_RATE_LIMITED while the key is locked, with Retry-After = what is left of a failure's lock, 2 s for
+     * a probe's. Redis down: fails open, uncounted.
      */
-    public void assertPasswordChangeAllowed(UUID userId) {
-        Long millisLeft;
+    @SuppressWarnings("unchecked")
+    public PasswordChangeAttempt reservePasswordChange(UUID userId) {
+        String suffix = passwordChange(userId);
+        String probeToken = PROBE_LOCK + UUID.randomUUID();
+        List<Long> result;
         try {
-            millisLeft = redis.getExpire(LOCK_PREFIX + passwordChange(userId), TimeUnit.MILLISECONDS);
+            result = redis.execute(RESERVE, List.of(LOCK_PREFIX + suffix, COUNT_PREFIX + suffix),
+                    String.valueOf(PASSWORD_CHANGE_LIMIT), String.valueOf(WINDOW.toMillis()), probeToken,
+                    String.valueOf(PROBE_RETRY.toMillis()), String.valueOf(PROBE_LOCK_TTL.toMillis()));
         } catch (Exception e) {
             failOpen("allowing password change", e);
-            return;
+            return new PasswordChangeAttempt(userId, 0, false, null);
         }
-        // PTTL: -2 when there is no lock, -1 for one without a TTL (never written so).
-        if (millisLeft != null && millisLeft != -2) {
-            throw new RateLimitedException(ErrorCode.PASSWORD_CHANGE_RATE_LIMITED, retryAfterSeconds(millisLeft));
+        if (result == null || result.isEmpty()) {
+            return new PasswordChangeAttempt(userId, 0, false, null);
+        }
+        if (result.get(0) == 0L) {
+            throw new RateLimitedException(ErrorCode.PASSWORD_CHANGE_RATE_LIMITED, retryAfterSeconds(result.get(1)));
+        }
+        boolean probe = result.size() > 2 && result.get(2) == 1L;
+        return new PasswordChangeAttempt(userId, result.get(1), probe, probe ? probeToken : null);
+    }
+
+    /**
+     * A wrong current password keeps its place; the one whose place reached the limit locks password changes for
+     * {@link #LOCK 15 minutes} (overwriting a probe's lock).
+     */
+    public void recordPasswordChangeFailure(PasswordChangeAttempt attempt) {
+        try {
+            lockAtLimit(passwordChange(attempt.userId()), attempt.count(), PASSWORD_CHANGE_LIMIT,
+                    FAIL_LOCK + UUID.randomUUID());
+        } catch (Exception e) {
+            failOpen("password change lock not set", e);
         }
     }
 
     /**
-     * Counts a wrong current password; the fifth within the window locks password changes for 15 minutes. One atomic
-     * step, so the counter never lives on without its window.
+     * Any other outcome (a success, an unchanged or invalid new password, an exception) hands the place back and lifts
+     * a lock the attempt set as the probe. The counter itself is never deleted: earlier failures still count.
      */
-    public void recordPasswordChangeFailure(UUID userId) {
+    public void releasePasswordChange(PasswordChangeAttempt attempt) {
+        String suffix = passwordChange(attempt.userId());
+        List<String> keys = new ArrayList<>(2);
+        if (attempt.count() > 0) {
+            keys.add(COUNT_PREFIX + suffix);
+        }
+        int counters = keys.size();
+        if (attempt.probe() && attempt.probeToken() != null) {
+            keys.add(LOCK_PREFIX + suffix);
+        }
+        if (keys.isEmpty()) {
+            return;
+        }
         try {
-            countFailure(passwordChange(userId), PASSWORD_CHANGE_LIMIT, FAIL_LOCK + UUID.randomUUID());
+            redis.execute(RELEASE, keys, String.valueOf(counters), "0",
+                    attempt.probeToken() == null ? "" : attempt.probeToken());
         } catch (Exception e) {
-            failOpen("password change failure not counted", e);
+            failOpen("password change place not released", e);
         }
     }
 

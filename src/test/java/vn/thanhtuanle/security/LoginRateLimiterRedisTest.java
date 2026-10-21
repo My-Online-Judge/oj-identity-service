@@ -21,6 +21,7 @@ import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.common.util.ClientMeta;
 import vn.thanhtuanle.oj.common.web.error.RateLimitedException;
 import vn.thanhtuanle.security.LoginRateLimiter.Attempt;
+import vn.thanhtuanle.security.LoginRateLimiter.PasswordChangeAttempt;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -584,31 +585,115 @@ class LoginRateLimiterRedisTest {
         assertThat(redis.hasKey("oj:rl:login:ip:10.0.0.1")).isFalse();
     }
 
+    /** One wrong current password: reserve, then the failure. */
+    private void failPasswordChange(UUID userId) {
+        limiter.recordPasswordChangeFailure(limiter.reservePasswordChange(userId));
+    }
+
     @Test
     void passwordChangeLocksAfterFive() {
         UUID me = UUID.randomUUID();
         UUID someoneElse = UUID.randomUUID();
         for (int i = 0; i < 4; i++) {
-            limiter.recordPasswordChangeFailure(me);
+            failPasswordChange(me);
         }
-        assertThatCode(() -> limiter.assertPasswordChangeAllowed(me)).doesNotThrowAnyException();
+        assertThat(redis.hasKey("oj:rl:lock:pwchange:" + me)).isFalse();
 
-        limiter.recordPasswordChangeFailure(me);
+        failPasswordChange(me);
 
-        assertThatThrownBy(() -> limiter.assertPasswordChangeAllowed(me))
+        assertThatThrownBy(() -> limiter.reservePasswordChange(me))
                 .isInstanceOfSatisfying(RateLimitedException.class, e -> {
                     // Its own message: this is not about failed logins.
                     assertThat(e.getErrorCode()).isEqualTo(ErrorCode.PASSWORD_CHANGE_RATE_LIMITED);
                     assertThat(e.getErrorCode().getStatusCode().value()).isEqualTo(429);
                     assertThat(e.getRetryAfterSeconds()).isBetween(899L, 900L);
                 });
-        assertThatCode(() -> limiter.assertPasswordChangeAllowed(someoneElse)).doesNotThrowAnyException();
+        assertThatCode(() -> limiter.reservePasswordChange(someoneElse)).doesNotThrowAnyException();
         assertThat(ttl("oj:rl:login:pwchange:" + me)).isBetween(290L, 300L);
         assertThat(ttl("oj:rl:lock:pwchange:" + me)).isBetween(890L, 900L);
 
         redis.expire("oj:rl:lock:pwchange:" + me, Duration.ofSeconds(42));
-        assertThatThrownBy(() -> limiter.assertPasswordChangeAllowed(me))
+        assertThatThrownBy(() -> limiter.reservePasswordChange(me))
                 .isInstanceOfSatisfying(RateLimitedException.class, e ->
                         assertThat(e.getRetryAfterSeconds()).isBetween(41L, 42L));
+    }
+
+    /**
+     * A stolen session fires 20 wrong current passwords at once: each takes its place before BCrypt runs, so at most
+     * the limit and one probe are checked, and the failures then lock password changes for 15 minutes.
+     */
+    @Test
+    void aBurstOfWrongCurrentPasswordsGetsAtMostSixChecks() throws Exception {
+        UUID me = UUID.randomUUID();
+        int threads = 20;
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger checked = new AtomicInteger();
+        AtomicInteger refused = new AtomicInteger();
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        try {
+            List<Future<?>> calls = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                calls.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        PasswordChangeAttempt attempt = limiter.reservePasswordChange(me);
+                        checked.incrementAndGet();
+                        limiter.recordPasswordChangeFailure(attempt);
+                    } catch (RateLimitedException e) {
+                        assertThat(e.getErrorCode()).isEqualTo(ErrorCode.PASSWORD_CHANGE_RATE_LIMITED);
+                        refused.incrementAndGet();
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> call : calls) {
+                call.get(10, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(checked.get()).isLessThanOrEqualTo(6);
+        assertThat(checked.get() + refused.get()).isEqualTo(threads);
+        assertThatThrownBy(() -> limiter.reservePasswordChange(me))
+                .isInstanceOfSatisfying(RateLimitedException.class,
+                        e -> assertThat(e.getRetryAfterSeconds()).isGreaterThan(800));
+    }
+
+    @Test
+    void aSuccessHandsItsPlaceBack() {
+        UUID me = UUID.randomUUID();
+        for (int i = 0; i < 4; i++) {
+            failPasswordChange(me);
+        }
+        limiter.releasePasswordChange(limiter.reservePasswordChange(me));
+
+        PasswordChangeAttempt next = limiter.reservePasswordChange(me);
+
+        // The fifth place, not over the limit: no probe, no lock.
+        assertThat(next.count()).isEqualTo(5);
+        assertThat(next.probe()).isFalse();
+        assertThat(redis.hasKey("oj:rl:lock:pwchange:" + me)).isFalse();
+    }
+
+    @Test
+    void aProbeLockTellsTwoSeconds() {
+        UUID me = UUID.randomUUID();
+        for (int i = 0; i < 5; i++) {
+            limiter.reservePasswordChange(me);   // five checks still in flight
+        }
+        PasswordChangeAttempt probe = limiter.reservePasswordChange(me);
+        assertThat(probe.probe()).isTrue();
+        assertThat(ttl("oj:rl:lock:pwchange:" + me)).isBetween(55L, 60L);
+
+        assertThatThrownBy(() -> limiter.reservePasswordChange(me))
+                .isInstanceOfSatisfying(RateLimitedException.class,
+                        e -> assertThat(e.getRetryAfterSeconds()).isEqualTo(2));
+
+        // A probe that ends without a verdict lifts its own lock and hands its place back.
+        limiter.releasePasswordChange(probe);
+        assertThat(redis.hasKey("oj:rl:lock:pwchange:" + me)).isFalse();
+        assertThat(value("oj:rl:login:pwchange:" + me)).isEqualTo("5");
     }
 }

@@ -12,8 +12,10 @@ import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import vn.thanhtuanle.auth.AuthCookies;
+import vn.thanhtuanle.common.exception.ErrorCode;
 import vn.thanhtuanle.config.SecurityConfig;
 import vn.thanhtuanle.oj.common.security.OjJwtAuthenticationFilter;
+import vn.thanhtuanle.oj.common.web.error.RateLimitedException;
 import vn.thanhtuanle.oj.common.web.security.OjAccessDeniedHandler;
 import vn.thanhtuanle.oj.common.web.security.OjAuthenticationEntryPoint;
 
@@ -21,9 +23,11 @@ import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.startsWith;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -56,5 +60,17 @@ class ChangePasswordControllerTest {
                 .andExpect(header().stringValues("Set-Cookie",
                         hasItem(allOf(startsWith("refreshToken="), containsString("Max-Age=0")))));
         verify(userService).changeOwnPassword("OldPass12", "NewPass12");
+    }
+
+    @Test
+    @WithMockUser
+    void aLockedChangeIs429WithRetryAfterAndCode() throws Exception {
+        doThrow(new RateLimitedException(ErrorCode.PASSWORD_CHANGE_RATE_LIMITED, 600))
+                .when(userService).changeOwnPassword("OldPass12", "NewPass12");
+
+        mockMvc.perform(put("/api/v1/users/me/password").contentType(MediaType.APPLICATION_JSON).content(BODY))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(header().string("Retry-After", "600"))
+                .andExpect(content().string(containsString("\"code\":\"PASSWORD_CHANGE_RATE_LIMITED\"")));
     }
 }
