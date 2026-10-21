@@ -41,6 +41,7 @@ import vn.thanhtuanle.user.HandleAllocator;
 import vn.thanhtuanle.user.RoleRepository;
 import vn.thanhtuanle.user.UserLockTimeoutException;
 import vn.thanhtuanle.user.UserRepository;
+import vn.thanhtuanle.user.UserRowLockImpl;
 import vn.thanhtuanle.user.dto.UserResponse;
 import vn.thanhtuanle.user.mapper.UserMapper;
 
@@ -675,7 +676,9 @@ public class AuthService {
      *
      * <p>Not {@code @Transactional}: the sessions end in a transaction of their own, which is tried once more when the
      * user's row stays locked past the lock timeout. The caller clears the cookies whatever this answers, so giving up
-     * at once would leave every other session alive with nothing left in the browser to retry from.
+     * at once would leave every other session alive with nothing left in the browser to retry from. Each try waits at
+     * most {@link UserRowLockImpl#LOGOUT_LOCK_TIMEOUT} (3 s) for the row, so the whole call takes at most about 6.5 s,
+     * under the portal's 10 s request timeout.
      */
     public void logout(String refreshToken) {
         log.info("Logout request received");
@@ -707,10 +710,13 @@ public class AuthService {
         log.info("User logged out successfully");
     }
 
-    /** Under the user's row lock, in a transaction of its own: every token row goes, every access token is revoked. */
+    /**
+     * Under the user's row lock (a short wait, {@link UserRowLockImpl#LOGOUT_LOCK_TIMEOUT}), in a transaction of its
+     * own: every token row goes, every access token is revoked.
+     */
     private void endEverySession(UUID uid) {
         transactionTemplate.executeWithoutResult(status -> {
-            userRepository.lockById(uid);
+            userRepository.lockById(uid, UserRowLockImpl.LOGOUT_LOCK_TIMEOUT);
             tokenRepository.deleteAllByUserId(uid);
             // Every device's access token, not only the caller's: the gateway strips tokens issued before the cutoff.
             sessionRevoker.revokeAccessTokensAfterCommit(List.of(uid));

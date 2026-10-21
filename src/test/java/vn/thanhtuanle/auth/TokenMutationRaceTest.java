@@ -416,17 +416,17 @@ class TokenMutationRaceTest {
     void aLogoutWaitingTooLongForTheUserRowAnswers503() throws Exception {
         Session session = login();
 
-        // Two waits: it tries once more before giving up.
+        // Two short (3 s) waits: it tries once more before giving up.
         assertGivesUpWith503(() -> {
             authService.logout(session.refreshToken());
             return null;
-        }, session.userId(), Duration.ofMillis(9_500), Duration.ofSeconds(18));
+        }, session.userId(), Duration.ofMillis(5_500), Duration.ofSeconds(9));
 
         assertThat(rowsOf(session.userId())).containsExactly("ACCESS false", "REFRESH false");
     }
 
     /**
-     * A logout whose first wait for the user row gives up (5 s) tries once more, in a fresh transaction: the row is free
+     * A logout whose first wait for the user row gives up (3 s) tries once more, in a fresh transaction: the row is free
      * by then, and every session ends. The browser's cookies are cleared whatever logout answers, so giving up at once
      * would leave every other session alive with nothing left to retry from.
      */
@@ -440,8 +440,8 @@ class TokenMutationRaceTest {
                 return null;
             });
             awaitLockWaiters(1);
-            // Longer than one lock timeout, shorter than two: the first wait has given up, the second is waiting.
-            Thread.sleep(6_500);
+            // Longer than one logout lock timeout, shorter than two: the first wait has given up, the second is waiting.
+            Thread.sleep(4_500);
             holder.rollback();
         }
 

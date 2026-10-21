@@ -10,11 +10,13 @@ import org.hibernate.dialect.PostgreSQLDialect;
 import org.hibernate.engine.spi.SessionFactoryImplementor;
 import vn.thanhtuanle.entity.User;
 
+import java.time.Duration;
 import java.util.Optional;
 import java.util.UUID;
 
 /**
- * The lock behind {@link UserRowLock#lockById}: {@code SELECT … FOR UPDATE} with a 5 s lock timeout.
+ * The lock behind {@link UserRowLock#lockById}: {@code SELECT … FOR UPDATE} with a 5 s lock timeout, or the caller's
+ * own (logout's is 3 s).
  *
  * <p>The timeout is {@code SET LOCAL lock_timeout} in the caller's transaction (it then bounds that transaction's later
  * lock waits too, and ends with it), and it runs before any pending write of the transaction is flushed, so that write's
@@ -22,9 +24,11 @@ import java.util.UUID;
  * PostgreSQL dialect ignores a positive timeout, and a test showed the lock waiting past 10 s with it. H2 (the test
  * profile) has no such statement and is left alone.
  */
-class UserRowLockImpl implements UserRowLock {
+public class UserRowLockImpl implements UserRowLock {
 
-    static final String LOCK_TIMEOUT = "5s";
+    static final Duration LOCK_TIMEOUT = Duration.ofSeconds(5);
+    /** Logout tries twice, so two waits stay under the portal's 10 s request timeout. */
+    public static final Duration LOGOUT_LOCK_TIMEOUT = Duration.ofSeconds(3);
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -33,11 +37,17 @@ class UserRowLockImpl implements UserRowLock {
 
     @Override
     public Optional<User> lockById(UUID id) {
+        return lockById(id, LOCK_TIMEOUT);
+    }
+
+    @Override
+    public Optional<User> lockById(UUID id, Duration timeout) {
         if (isPostgres()) {
             // Not flushed first (a native query in AUTO mode flushes the whole session): a pending write of this
             // user, such as a password change's UPDATE, would meet a held row before the timeout is set and wait
             // without limit. The locking select below flushes it, under the timeout.
-            entityManager.createNativeQuery("set local lock_timeout = '" + LOCK_TIMEOUT + "'")
+            // A long from a Duration, never user input: SET takes no bind parameters.
+            entityManager.createNativeQuery("set local lock_timeout = '" + timeout.toMillis() + "ms'")
                     .setFlushMode(FlushModeType.COMMIT)
                     .executeUpdate();
         }

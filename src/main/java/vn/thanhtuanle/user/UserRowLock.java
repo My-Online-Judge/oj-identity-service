@@ -2,6 +2,7 @@ package vn.thanhtuanle.user;
 
 import vn.thanhtuanle.entity.User;
 
+import java.time.Duration;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -15,4 +16,10 @@ public interface UserRowLock {
      * {@link UserLockTimeoutException} (503), and the caller's transaction rolls back.
      */
     Optional<User> lockById(UUID id);
+
+    /**
+     * {@link #lockById(UUID)} with a wait of its own: at most {@code timeout} for a holder, then
+     * {@link UserLockTimeoutException}. Logout uses {@link UserRowLockImpl#LOGOUT_LOCK_TIMEOUT}.
+     */
+    Optional<User> lockById(UUID id, Duration timeout);
 }

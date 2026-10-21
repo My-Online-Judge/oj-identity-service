@@ -24,8 +24,10 @@ import vn.thanhtuanle.common.util.JwtUtil;
 import vn.thanhtuanle.entity.Token;
 import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.repository.TokenRepository;
+import vn.thanhtuanle.user.UserLockTimeoutException;
 import vn.thanhtuanle.user.UserRepository;
 
+import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
@@ -36,6 +38,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -125,7 +128,7 @@ class AuthServiceLogoutTest {
 
         // A rotation running at the same time must not slip a successor past the delete.
         InOrder order = inOrder(userRepository, tokenRepository);
-        order.verify(userRepository).lockById(userId);
+        order.verify(userRepository).lockById(userId, Duration.ofSeconds(3));
         order.verify(tokenRepository).deleteAllByUserId(userId);
     }
 
@@ -175,5 +178,20 @@ class AuthServiceLogoutTest {
 
         verify(tokenRepository, never()).deleteAllByUserId(any());
         verifyNoInteractions(sessionRevoker, userRepository);
+    }
+
+    @Test
+    void bothTriesUseTheShortLockTimeout() {
+        String token = "current.access.token";
+        UUID userId = signedIn(token).getId();
+        when(userRepository.lockById(userId, Duration.ofSeconds(3)))
+                .thenThrow(new UserLockTimeoutException(new RuntimeException("lock timeout")))
+                .thenReturn(Optional.empty());
+
+        authService.logout(null);
+
+        verify(userRepository, times(2)).lockById(userId, Duration.ofSeconds(3));
+        verify(userRepository, never()).lockById(userId);
+        verify(tokenRepository).deleteAllByUserId(userId);
     }
 }
