@@ -96,8 +96,10 @@ public class UserService {
         return userRepository.findLiveByIdIn(ids).stream().map(UserService::toPublicProfile).toList();
     }
 
+    /** Email is never public: a username with an '@' (a Google sign-up's is its address) is left out, never derived. */
     private static PublicProfileResponse toPublicProfile(User u) {
-        return new PublicProfileResponse(u.getId(), u.getUsername(), u.getName(), u.getAvatar(), u.getCreatedAt());
+        String username = u.getUsername() == null || u.getUsername().contains("@") ? null : u.getUsername();
+        return new PublicProfileResponse(u.getId(), username, u.getName(), u.getAvatar(), u.getCreatedAt());
     }
 
     // ----- create -----

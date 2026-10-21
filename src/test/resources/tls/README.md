@@ -9,5 +9,7 @@ with mutual TLS. They protect nothing and must never be used outside tests. Prod
 - `server.*`: a server leaf (CN=localhost, SAN localhost / 127.0.0.1)
 - `api-gateway.*`: a client leaf signed by the CA
 - `tls-probe.*`: a client leaf signed by the CA whose CN is in no allowlist
+- `submission-service.crt`: a client leaf signed by the CA (certificate only, copied from the same fixture run in
+  oj-submission-service), for tests that read the peer CN of an internal service
 - `rogue-client.*`: a client leaf signed by a different (discarded) CA, which Postgres and the service must refuse
 - `pg_hba.conf`: the same rules as the `pg-hba` config in judge-deployment/docker-compose.yml

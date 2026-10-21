@@ -27,6 +27,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 
 /**
  * Public profiles on identity's real schema (Flyway V1-V6 on Postgres): V6 lets a soft-deleted account keep the name
@@ -73,6 +74,13 @@ class UserServicePublicProfileTest {
         return userRepository.save(User.builder().username(username).name("Name " + username).avatar("av.png")
                 .email(unique("mail") + "@example.com").password("{noop}unused").status(status)
                 .roles(new HashSet<>()).build());
+    }
+
+    /** A Google sign-up: its username is its email address (AuthService.newAccount). */
+    private User googleStyle() {
+        String email = unique("student") + "@gmail.com";
+        return userRepository.save(User.builder().username(email).name("Student").avatar("g.png").email(email)
+                .googleId(unique("sub")).status(UserStatus.ACTIVE.getValue()).roles(new HashSet<>()).build());
     }
 
     @Test
@@ -132,5 +140,33 @@ class UserServicePublicProfileTest {
                 List.of(a.getId(), d.getId(), gone.getId(), UUID.randomUUID()));
 
         assertThat(found).extracting(PublicProfileResponse::id).containsExactlyInAnyOrder(a.getId(), d.getId());
+    }
+
+    @Test
+    void anEmailShapedUsernameIsNeverInTheProfile() {
+        User student = googleStyle();
+
+        PublicProfileResponse profile = userService.publicProfile(student.getUsername());
+
+        assertThat(profile.id()).isEqualTo(student.getId());
+        assertThat(profile.username()).isNull();
+        assertThat(profile.name()).isEqualTo("Student");
+        assertThat(profile.avatar()).isEqualTo("g.png");
+        assertThat(profile.createdAt()).isNotNull();
+    }
+
+    @Test
+    void anEmailShapedUsernameIsNeverInTheBatchWhileANormalOneIsKept() {
+        User student = googleStyle();
+        String handle = unique("bob");
+        User bob = saved(handle, UserStatus.ACTIVE.getValue());
+
+        List<PublicProfileResponse> found = userService.publicProfiles(List.of(student.getId(), bob.getId()));
+
+        assertThat(found)
+                .extracting(PublicProfileResponse::id, PublicProfileResponse::username, PublicProfileResponse::name)
+                .containsExactlyInAnyOrder(
+                        tuple(student.getId(), null, "Student"),
+                        tuple(bob.getId(), handle, "Name " + handle));
     }
 }

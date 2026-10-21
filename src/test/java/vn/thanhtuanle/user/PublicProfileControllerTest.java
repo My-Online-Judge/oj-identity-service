@@ -23,13 +23,22 @@ import vn.thanhtuanle.oj.common.web.security.OjAuthenticationEntryPoint;
 import vn.thanhtuanle.common.exception.GlobalExceptionHandler;
 import vn.thanhtuanle.user.dto.PublicProfileResponse;
 
+import javax.security.auth.x500.X500Principal;
+import java.io.InputStream;
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -46,6 +55,17 @@ class PublicProfileControllerTest {
     @MockBean UserService userService;
     @MockBean JwtDecoder jwtDecoder;
     @MockBean UserDetailsService userDetailsService;
+
+    private static final String CERT_ATTRIBUTE = "jakarta.servlet.request.X509Certificate";
+    private static final String EMAIL = "alice@example.com";
+
+    /** The verified mTLS chain the servlet container puts on a request, as in ClientIpResolverTest. */
+    private static X509Certificate[] peer(String name) throws Exception {
+        try (InputStream in = Files.newInputStream(Path.of("src/test/resources/tls/" + name))) {
+            return new X509Certificate[] {
+                    (X509Certificate) CertificateFactory.getInstance("X.509").generateCertificate(in)};
+        }
+    }
 
     @Test
     void anonymousReadsAProfileWithoutPrivateFields() throws Exception {
@@ -123,5 +143,71 @@ class PublicProfileControllerTest {
             root.detachAppender(appender);
         }
         assertThat(appender.list).noneMatch(e -> e.getLevel().isGreaterOrEqual(Level.ERROR));
+    }
+
+    @Test
+    void anEmailPathIs404ForAnAnonymousCallerWithoutALookup() throws Exception {
+        mockMvc.perform(get("/api/v1/users/public/" + EMAIL))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.message").value("User not found"));
+        mockMvc.perform(get(URI.create("/api/v1/users/public/alice%40example.com")))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.message").value("User not found"));
+        verifyNoInteractions(userService);
+    }
+
+    @Test
+    void anEmailPathIs404ThroughTheGatewayAndForAnyOtherClient() throws Exception {
+        for (String cert : List.of("api-gateway.crt", "tls-probe.crt")) {
+            mockMvc.perform(get("/api/v1/users/public/" + EMAIL).requestAttr(CERT_ATTRIBUTE, peer(cert)))
+                    .andExpect(status().isNotFound())
+                    .andExpect(jsonPath("$.message").value("User not found"));
+        }
+        verifyNoInteractions(userService);
+    }
+
+    @Test
+    void anEmailPathResolvesForSubmissionService() throws Exception {
+        UUID id = UUID.randomUUID();
+        when(userService.publicProfile(EMAIL)).thenReturn(
+                new PublicProfileResponse(id, null, "Alice", null, LocalDateTime.of(2026, 1, 2, 3, 4)));
+
+        mockMvc.perform(get("/api/v1/users/public/" + EMAIL)
+                        .requestAttr(CERT_ATTRIBUTE, peer("submission-service.crt")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.id").value(id.toString()))
+                .andExpect(jsonPath("$.data.username").doesNotExist());
+    }
+
+    @Test
+    void anEmailPathResolvesForProblemService() throws Exception {
+        // No problem-service leaf is signed by the test CA; the check reads the CN only.
+        X509Certificate problemService = mock(X509Certificate.class);
+        when(problemService.getSubjectX500Principal()).thenReturn(new X500Principal("CN=problem-service"));
+        UUID id = UUID.randomUUID();
+        when(userService.publicProfile(EMAIL)).thenReturn(
+                new PublicProfileResponse(id, null, "Alice", null, LocalDateTime.of(2026, 1, 2, 3, 4)));
+
+        mockMvc.perform(get("/api/v1/users/public/" + EMAIL)
+                        .requestAttr(CERT_ATTRIBUTE, new X509Certificate[] {problemService}))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.id").value(id.toString()));
+    }
+
+    @Test
+    void aNormalPathWorksForEveryCaller() throws Exception {
+        UUID id = UUID.randomUUID();
+        when(userService.publicProfile("alice")).thenReturn(
+                new PublicProfileResponse(id, "alice", "Alice", null, LocalDateTime.of(2026, 1, 2, 3, 4)));
+
+        for (X509Certificate[] chain : Arrays.asList(null, peer("api-gateway.crt"), peer("submission-service.crt"))) {
+            var request = get("/api/v1/users/public/alice");
+            if (chain != null) {
+                request.requestAttr(CERT_ATTRIBUTE, chain);
+            }
+            mockMvc.perform(request)
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data.username").value("alice"));
+        }
     }
 }
