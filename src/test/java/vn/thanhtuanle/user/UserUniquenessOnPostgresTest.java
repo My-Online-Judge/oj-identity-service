@@ -230,64 +230,64 @@ class UserUniquenessOnPostgresTest {
     }
 
     /**
-     * A Google sign-in that creates an account gets the index's reason too. Here a Google account signed up as
-     * {@code dave.x@corp.example} (that is its username) and its email was changed since; a different Google account
-     * with that address in another case finds no account by sub or email, and its new account's username collides.
+     * A Google sign-up's handle is made from its display name and skips one a live account has, in any case: a
+     * Grace who signs up next to a live {@code Grace_<tag>} is {@code grace_<tag>_2}.
      */
     @Test
-    void aGoogleSignInWhoseUsernameIsTaken_isRefusedWithItsReason() {
-        String taken = unique("grace") + "@corp.example";
-        userRepository.save(User.builder().username(taken).name("Grace").email(unique("grace.new") + "@corp.example")
-                .googleId(unique("sub")).status(UserStatus.ACTIVE.getValue()).roles(new HashSet<>()).build());
+    void aGoogleSignUpWhoseHandleIsTaken_getsTheNextFreeOne() {
+        String tag = letters();
+        saved("Grace_" + tag, unique("grace") + "@corp.example");
         long accounts = userRepository.count();
-        String idToken = new PlainJWT(new JWTClaimsSet.Builder()
-                .issuer("https://accounts.google.com").audience(googleClientId).subject(unique("sub"))
-                .expirationTime(Date.from(Instant.now().plusSeconds(3600)))
-                .claim("nonce", "n-1").claim("email", taken.toUpperCase()).claim("email_verified", true)
-                .claim("hd", "corp.example").build()).serialize();
-        when(restTemplate.postForEntity(anyString(), any(HttpEntity.class), eq(ExchangeTokenResponse.class)))
-                .thenReturn(ResponseEntity.ok(new ExchangeTokenResponse(null, null, null, null, null, idToken)));
+        String email = unique("grace.new") + "@gmail.com";
+        googleAnswersFor(unique("sub"), email, "Grace " + tag);
 
-        assertThatThrownBy(() -> authService.authenticateGoogleUser("code", "verifier", "n-1",
-                new ClientMeta("10.0.0.8", "dev-8", "pg/1.0")))
-                .isInstanceOfSatisfying(AppException.class,
-                        e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USERNAME_EXISTED));
-        assertThat(userRepository.count()).isEqualTo(accounts);
+        authService.authenticateGoogleUser("code", "verifier", "n-1", new ClientMeta("10.0.0.8", "dev-8", "pg/1.0"));
+
+        assertThat(userRepository.count()).isEqualTo(accounts + 1);
+        assertThat(userRepository.findLiveByEmail(email)).get().extracting(User::getUsername)
+                .isEqualTo("grace_" + tag + "_2");
     }
 
-    /** Google's token endpoint answers with a verified id token for this Google account. */
-    private void googleAnswersFor(String sub, String email) {
+    /** Lowercase letters only, so a display name "Name <tag>" asks for the handle "name_<tag>". */
+    private static String letters() {
+        return java.util.concurrent.ThreadLocalRandom.current().ints(8, 'a', 'z' + 1)
+                .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append).toString();
+    }
+
+    /** Google's token endpoint answers with a verified id token for this Google account and display name. */
+    private void googleAnswersFor(String sub, String email, String name) {
         String idToken = new PlainJWT(new JWTClaimsSet.Builder()
                 .issuer("https://accounts.google.com").audience(googleClientId).subject(sub)
                 .expirationTime(Date.from(Instant.now().plusSeconds(3600)))
-                .claim("nonce", "n-1").claim("email", email).claim("email_verified", true).build()).serialize();
+                .claim("nonce", "n-1").claim("email", email).claim("email_verified", true).claim("name", name)
+                .build()).serialize();
         when(restTemplate.postForEntity(anyString(), any(HttpEntity.class), eq(ExchangeTokenResponse.class)))
                 .thenReturn(ResponseEntity.ok(new ExchangeTokenResponse(null, null, null, null, null, idToken)));
     }
 
     /**
-     * V6 counts live accounts only, so a soft-deleted account may keep the exact username of a live one. Here a Google
-     * account signed up as {@code kate@uni.edu.vn}, had its email changed, and was soft-deleted; another Google account
-     * with that address signs up and gets the same username. A lookup by username sees only the live account, so the
-     * new account's own requests (and its next sign-in) work.
+     * V6 counts live accounts only, so a soft-deleted account may keep the exact username of a live one. Here a Kate
+     * signed up as {@code kate_<tag>} and was soft-deleted; another Kate signs up with Google and gets the same handle.
+     * A lookup by username sees only the live account, so the new account's own requests (and its next sign-in) work.
      */
     @Test
     void aGoogleAccountWithTheUsernameOfADeletedAccount_isTheOneItsUsernameFinds() throws Exception {
-        String address = unique("kate") + "@uni.edu.vn";
-        userRepository.save(User.builder().username(address).name("Kate").email(unique("kate.new") + "@uni.edu.vn")
+        String tag = letters();
+        String handle = "kate_" + tag;
+        userRepository.save(User.builder().username(handle).name("Kate").email(unique("kate.old") + "@uni.edu.vn")
                 .googleId(unique("sub")).status(UserStatus.DELETED.getValue()).roles(new HashSet<>()).build());
         String sub = unique("sub");
-        googleAnswersFor(sub, address);
+        googleAnswersFor(sub, unique("kate") + "@uni.edu.vn", "Kate " + tag);
         ClientMeta meta = new ClientMeta("10.0.0.9", "dev-9", "pg/1.0");
 
         String accessToken = authService.authenticateGoogleUser("code", "verifier", "n-1", meta).getAccessToken();
 
-        assertThat(userRepository.findByUsername(address)).get()
+        assertThat(userRepository.findByUsername(handle)).get()
                 .extracting(User::getGoogleId, User::getStatus)
                 .containsExactly(sub, UserStatus.ACTIVE.getValue());
         mockMvc.perform(get("/api/v1/auth/me").header("Authorization", "Bearer " + accessToken))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.username").value(address))
+                .andExpect(jsonPath("$.data.username").value(handle))
                 .andExpect(jsonPath("$.data.googleId").value(sub));
         assertThat(authService.authenticateGoogleUser("code", "verifier", "n-1", meta).getAccessToken()).isNotNull();
     }

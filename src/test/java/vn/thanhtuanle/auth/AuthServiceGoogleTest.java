@@ -40,6 +40,7 @@ import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.oj.common.web.error.AppException;
 import vn.thanhtuanle.repository.TokenRepository;
 import vn.thanhtuanle.security.LoginAttemptService;
+import vn.thanhtuanle.user.HandleAllocator;
 import vn.thanhtuanle.user.RoleRepository;
 import vn.thanhtuanle.user.UserRepository;
 
@@ -52,13 +53,16 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.Date;
+import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -91,6 +95,7 @@ class AuthServiceGoogleTest {
     @Mock RoleRepository roleRepository;
     @Mock RestTemplate restTemplate;
     @Mock LoginAttemptService loginAttemptService;
+    @Mock HandleAllocator handleAllocator;
 
     @Spy Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
     @Spy GoogleIdTokenVerifier googleIdTokenVerifier = new GoogleIdTokenVerifier(CLIENT_ID, clock);
@@ -116,6 +121,11 @@ class AuthServiceGoogleTest {
 
     /** The same, for this email; {@code hd} is the Workspace domain claim (null: a consumer Google account). */
     private static String idToken(boolean emailVerified, String email, String hd) {
+        return idToken(emailVerified, email, hd, "Alice");
+    }
+
+    /** The same, with this Google display name. */
+    private static String idToken(boolean emailVerified, String email, String hd, String name) {
         JWTClaimsSet.Builder claims = new JWTClaimsSet.Builder()
                 .issuer("https://accounts.google.com")
                 .audience(CLIENT_ID)
@@ -124,7 +134,7 @@ class AuthServiceGoogleTest {
                 .claim("nonce", NONCE)
                 .claim("email", email)
                 .claim("email_verified", emailVerified)
-                .claim("name", "Alice")
+                .claim("name", name)
                 .claim("picture", "https://example.com/alice.png");
         if (hd != null) {
             claims.claim("hd", hd);
@@ -141,8 +151,9 @@ class AuthServiceGoogleTest {
         return account(googleId, EMAIL);
     }
 
+    /** An account whose username is already a handle, as every live one is after V8. */
     private static User account(String googleId, String email) {
-        User u = User.builder().username(email).email(email).googleId(googleId)
+        User u = User.builder().username("alice").name("Alice").email(email).googleId(googleId)
                 .status(CommonStatus.ACTIVE.getValue()).build();
         u.setId(UUID.randomUUID());
         return u;
@@ -457,6 +468,7 @@ class AuthServiceGoogleTest {
             }
             return saved;
         });
+        when(handleAllocator.allocate("Alice")).thenReturn("alice");
         ArgumentCaptor<User> created = ArgumentCaptor.forClass(User.class);
         when(jwtUtil.generateToken(created.capture())).thenReturn("AT");
         when(jwtUtil.generateRefreshToken(any(User.class))).thenReturn("RT");
@@ -467,7 +479,7 @@ class AuthServiceGoogleTest {
         User user = created.getValue();
         assertThat(user.getId()).isEqualTo(newId);
         assertThat(user.getEmail()).isEqualTo(EMAIL);
-        assertThat(user.getUsername()).isEqualTo(EMAIL);
+        assertThat(user.getUsername()).isEqualTo("alice");
         assertThat(user.getGoogleId()).isEqualTo(SUB);
         assertThat(user.getName()).isEqualTo("Alice");
         assertThat(user.getAvatar()).isEqualTo("https://example.com/alice.png");
@@ -545,5 +557,144 @@ class AuthServiceGoogleTest {
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.GOOGLE_ID_TOKEN_INVALID));
         verifyNoInteractions(userRepository, tokenRepository, transactionManager);
+    }
+
+    /**
+     * New accounts as the session's writes save them; ids are assigned on save, like the database does. The first
+     * {@code refusals} saves are refused by the username index instead.
+     */
+    private List<User> newAccountsAreSaved(int refusals) {
+        when(roleRepository.findByName("USER")).thenReturn(Optional.of(Role.builder().name("USER").build()));
+        List<User> saved = new java.util.ArrayList<>();
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        when(userRepository.saveAndFlush(any(User.class))).thenAnswer(invocation -> {
+            if (calls.getAndIncrement() < refusals) {
+                throw usernameTaken();
+            }
+            User user = invocation.getArgument(0);
+            user.setId(UUID.randomUUID());
+            saved.add(user);
+            return user;
+        });
+        when(jwtUtil.generateToken(any(User.class))).thenReturn("AT");
+        when(jwtUtil.generateRefreshToken(any(User.class))).thenReturn("RT");
+        return saved;
+    }
+
+    private static DataIntegrityViolationException usernameTaken() {
+        return new DataIntegrityViolationException("could not execute statement",
+                new ConstraintViolationException("could not execute statement",
+                        new SQLException("duplicate key value violates unique constraint", "23505"),
+                        "ux_users_username_lower"));
+    }
+
+    /** The handle is made from the Google display name (Q1); the email stays private. */
+    @Test
+    void aNewGoogleAccountGetsAHandleNotItsEmail() {
+        ReflectionTestUtils.setField(authService, "handleAllocator", new HandleAllocator(userRepository));
+        googleAnswers(idToken(true, "Nguyen.Van.A@gmail.com", null, "Nguyễn Văn A"));
+        List<User> saved = newAccountsAreSaved(0);
+
+        authService.authenticateGoogleUser(CODE, VERIFIER, NONCE, META);
+
+        assertThat(saved).singleElement().satisfies(user -> {
+            assertThat(user.getUsername()).isEqualTo("nguyen_van_a");
+            assertThat(user.getEmail()).isEqualTo("Nguyen.Van.A@gmail.com");
+            assertThat(user.getName()).isEqualTo("Nguyễn Văn A");
+        });
+        verify(userRepository).existsLiveByUsername("nguyen_van_a");
+    }
+
+    /** Two sign-ups picked the same free handle at once: the index refuses the second, which takes the next one. */
+    @Test
+    void aRaceOnTheHandleRetriesWithTheNextFreeOne(CapturedOutput output) {
+        googleAnswers(idToken(true));
+        List<User> saved = newAccountsAreSaved(1);
+        when(handleAllocator.allocate("Alice")).thenReturn("alice", "alice_2");
+
+        AuthResponse res = authService.authenticateGoogleUser(CODE, VERIFIER, NONCE, META);
+
+        assertThat(res.getAccessToken()).isEqualTo("AT");
+        assertThat(saved).singleElement().extracting(User::getUsername).isEqualTo("alice_2");
+        verify(transactionManager).rollback(any());
+        verify(transactionManager).commit(any());
+        verify(loginAttemptService).record(EMAIL, META, true, null);
+        assertThat(output).contains("Google sign-up lost a handle race; trying the next free one");
+    }
+
+    @Test
+    void threeLostRacesAreRefused() {
+        googleAnswers(idToken(true));
+        when(roleRepository.findByName("USER")).thenReturn(Optional.of(Role.builder().name("USER").build()));
+        when(handleAllocator.allocate("Alice")).thenReturn("alice", "alice_2", "alice_3");
+        when(userRepository.saveAndFlush(any(User.class))).thenThrow(usernameTaken());
+
+        assertLoginFailsWith(ErrorCode.USERNAME_EXISTED);
+        verify(userRepository, times(3)).saveAndFlush(any(User.class));
+        verify(transactionManager, times(3)).rollback(any());
+        verify(transactionManager, never()).commit(any());
+        verifyNoInteractions(tokenRepository, jwtUtil);
+        verify(loginAttemptService).record(EMAIL, META, false, "USERNAME_EXISTED");
+    }
+
+    /**
+     * An account that signed up before handles existed (its username is its email) gets its handle at its next
+     * sign-in, before the tokens are minted, so this login's access token already names it by the handle.
+     */
+    @Test
+    void aStragglerGetsItsHandleAtSignIn() {
+        googleAnswers(idToken(true));
+        User u = account(SUB, "old@gmail.com");
+        u.setUsername("old@gmail.com");
+        when(userRepository.findLiveByGoogleId(SUB)).thenReturn(Optional.of(u));
+        when(userRepository.lockById(u.getId())).thenReturn(Optional.of(u));
+        when(handleAllocator.allocate("Alice")).thenReturn("alice");
+        AtomicReference<String> mintedFor = new AtomicReference<>();
+        when(jwtUtil.generateToken(any(User.class))).thenAnswer(invocation -> {
+            mintedFor.set(invocation.<User>getArgument(0).getUsername());
+            return "AT";
+        });
+        when(jwtUtil.generateRefreshToken(any(User.class))).thenReturn("RT");
+
+        authService.authenticateGoogleUser(CODE, VERIFIER, NONCE, META);
+
+        assertThat(u.getUsername()).isEqualTo("alice");
+        assertThat(u.getEmail()).isEqualTo("old@gmail.com");
+        assertThat(mintedFor.get()).isEqualTo("alice");
+        // Flushed at once, so a unique index that refuses the handle does so inside the transaction.
+        InOrder order = inOrder(userRepository, jwtUtil);
+        order.verify(userRepository).saveAndFlush(u);
+        order.verify(jwtUtil).generateToken(u);
+    }
+
+    /** The straggler's handle lost a race: the sign-in reads the account again and takes the next free handle. */
+    @Test
+    void aStragglersLostHandleRaceRetriesToo() {
+        googleAnswers(idToken(true));
+        UUID id = UUID.randomUUID();
+        // Each transaction reads the row afresh, as the database has it: the rolled-back rename is not there.
+        when(userRepository.findLiveByGoogleId(SUB)).thenAnswer(invocation -> Optional.of(straggler(id)));
+        when(userRepository.lockById(id)).thenAnswer(invocation -> Optional.of(straggler(id)));
+        when(handleAllocator.allocate("Alice")).thenReturn("alice", "alice_2");
+        List<User> flushed = new java.util.ArrayList<>();
+        when(userRepository.saveAndFlush(any(User.class))).thenThrow(usernameTaken()).thenAnswer(invocation -> {
+            flushed.add(invocation.getArgument(0));
+            return invocation.getArgument(0);
+        });
+        when(jwtUtil.generateToken(any(User.class))).thenReturn("AT");
+        when(jwtUtil.generateRefreshToken(any(User.class))).thenReturn("RT");
+
+        assertThat(authService.authenticateGoogleUser(CODE, VERIFIER, NONCE, META).getAccessToken()).isEqualTo("AT");
+
+        assertThat(flushed).singleElement().extracting(User::getUsername).isEqualTo("alice_2");
+        verify(transactionManager).rollback(any());
+        verify(transactionManager).commit(any());
+    }
+
+    private static User straggler(UUID id) {
+        User u = account(SUB, "old@gmail.com");
+        u.setId(id);
+        u.setUsername("old@gmail.com");
+        return u;
     }
 }

@@ -37,6 +37,7 @@ import vn.thanhtuanle.security.LoginRateLimiter;
 import vn.thanhtuanle.entity.Token;
 import vn.thanhtuanle.entity.User;
 import vn.thanhtuanle.repository.TokenRepository;
+import vn.thanhtuanle.user.HandleAllocator;
 import vn.thanhtuanle.user.RoleRepository;
 import vn.thanhtuanle.user.UserLockTimeoutException;
 import vn.thanhtuanle.user.UserRepository;
@@ -81,6 +82,9 @@ public class AuthService {
     static final int MAX_CONCURRENT_BACKOFFS = 32;
     private final Semaphore backoffPermits = new Semaphore(MAX_CONCURRENT_BACKOFFS);
 
+    /** A Google sign-in whose new handle a concurrent sign-up took first tries this many more times. */
+    static final int MAX_HANDLE_RETRIES = 2;
+
     private final UserRepository userRepository;
     private final JwtUtil jwtUtil;
     private final TokenRepository tokenRepository;
@@ -96,6 +100,7 @@ public class AuthService {
     private final Sleeper sleeper;
     private final TransactionTemplate transactionTemplate;
     private final GoogleIdTokenVerifier googleIdTokenVerifier;
+    private final HandleAllocator handleAllocator;
 
     @Value("${application.security.jwt.refresh-token.expiration}")
     private long refreshTokenTtlMillis;
@@ -208,24 +213,36 @@ public class AuthService {
     /**
      * Finds the account and runs the sign-in's writes. When no account was found and a unique index on users refuses
      * the new one, an account may have been committed meanwhile (the same Google account's first sign-in from another
-     * tab won the race): the account is looked up once more, and the sign-in goes to the one found. With none found,
-     * the refusal stands.
+     * tab won the race): the account is looked up once more, and the sign-in goes to the one found. When the refusal is
+     * the handle's ({@code USERNAME_EXISTED}: another sign-up took it first), the writes run again with the next free
+     * handle, at most {@link #MAX_HANDLE_RETRIES} more times. Any other refusal stands.
      */
     private AuthResponse googleSession(GoogleIdentity google, ClientMeta meta) {
         GoogleMatch match = googleAccount(google);
-        try {
-            return inGoogleSessionTransaction(() -> startGoogleSession(match, google, meta));
-        } catch (AppException e) {
-            if (match.userId() != null || !UniqueUserConstraints.isConflict(e.getErrorCode())) {
-                throw e;
+        int handleRetries = 0;
+        while (true) {
+            GoogleMatch attempt = match;
+            try {
+                return inGoogleSessionTransaction(() -> startGoogleSession(attempt, google, meta));
+            } catch (AppException e) {
+                if (!UniqueUserConstraints.isConflict(e.getErrorCode())) {
+                    throw e;
+                }
+                if (attempt.userId() == null) {
+                    GoogleMatch again = googleAccount(google);
+                    if (again.userId() != null) {
+                        log.info("Google login: the new account conflicted with one committed meanwhile ({}); "
+                                + "signing in to it", e.getErrorCode().name());
+                        match = again;
+                        continue;
+                    }
+                }
+                if (e.getErrorCode() != ErrorCode.USERNAME_EXISTED || handleRetries == MAX_HANDLE_RETRIES) {
+                    throw e;
+                }
+                handleRetries++;
+                log.info("Google sign-up lost a handle race; trying the next free one");
             }
-            GoogleMatch again = googleAccount(google);
-            if (again.userId() == null) {
-                throw e;
-            }
-            log.info("Google login: the new account conflicted with one committed meanwhile ({}); signing in to it",
-                    e.getErrorCode().name());
-            return inGoogleSessionTransaction(() -> startGoogleSession(again, google, meta));
         }
     }
 
@@ -325,6 +342,7 @@ public class AuthService {
         if (user.getStatus() == null || user.getStatus() != CommonStatus.ACTIVE.getValue()) {
             throw new AppException(ErrorCode.USER_BLOCKED);
         }
+        giveHandleIfEmailNamed(user);
 
         String accessToken = jwtUtil.generateToken(user);
         String refreshToken = jwtUtil.generateRefreshToken(user);
@@ -342,6 +360,21 @@ public class AuthService {
                 .accessToken(accessToken)
                 .refreshToken(refreshToken)
                 .build();
+    }
+
+    /**
+     * An account that signed up with Google before handles existed has its email as its username (V8 renames those
+     * that exist at deploy time; this catches any made meanwhile). It gets its handle now, before this login's tokens
+     * are minted, so their {@code sub} is the handle. Flushed at once, so a unique index that refuses the handle does
+     * so inside the transaction, and the sign-in retries with the next free one.
+     */
+    private void giveHandleIfEmailNamed(User user) {
+        if (user.getUsername() == null || !user.getUsername().contains("@")) {
+            return;
+        }
+        user.setUsername(handleAllocator.allocate(HandleAllocator.sourceOf(user.getEmail(), user.getName())));
+        userRepository.saveAndFlush(user);
+        log.info("Google login: user {} got its public handle in place of its email", user.getId());
     }
 
     /**
@@ -402,7 +435,7 @@ public class AuthService {
         // Flushed now, so a unique index that refuses the new account does so here, inside the transaction.
         User user = userRepository.saveAndFlush(User.builder()
                 .name(google.name())
-                .username(google.email())
+                .username(handleAllocator.allocate(HandleAllocator.sourceOf(google.email(), google.name())))
                 .email(google.email())
                 .avatar(google.picture())
                 .googleId(google.sub())

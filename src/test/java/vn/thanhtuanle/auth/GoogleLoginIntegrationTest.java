@@ -37,6 +37,8 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * Google sign-ins end to end through the callback, on H2 with the real account rules and the real login audit. Only
@@ -228,5 +230,22 @@ class GoogleLoginIntegrationTest {
         assertThat(callback().getResponse().getRedirectedUrl())
                 .isEqualTo(APP + "/problems?login=failed&reason=USER_BLOCKED");
         assertThat(userRepository.count()).isEqualTo(accounts);
+    }
+
+    /** A first Google sign-in gets a handle made from the display name; the public profile shows it, never the email. */
+    @Test
+    void firstSignInCreatesAHandleAndTheProfileIsPublic() throws Exception {
+        String tag = String.valueOf(java.util.concurrent.ThreadLocalRandom.current().nextInt(100_000, 1_000_000));
+        String email = uniqueEmail("gmail.com");
+        googleSignsIn(identity("sub-" + UUID.randomUUID(), email).claim("name", "Trần Thị Bích " + tag));
+
+        assertSignedIn(callback());
+        String handle = "tran_thi_bich_" + tag;
+        assertThat(accountsWithEmail(email)).singleElement().extracting(User::getUsername).isEqualTo(handle);
+        mockMvc.perform(get("/api/v1/users/public/" + handle))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.username").value(handle))
+                .andExpect(jsonPath("$.data.email").doesNotExist())
+                .andExpect(jsonPath("$..email").isEmpty());
     }
 }
