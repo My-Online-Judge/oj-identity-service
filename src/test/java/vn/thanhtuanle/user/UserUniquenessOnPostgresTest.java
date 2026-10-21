@@ -23,14 +23,17 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import vn.thanhtuanle.auth.AuthService;
 import vn.thanhtuanle.auth.TokenHasher;
+import vn.thanhtuanle.auth.dto.AuthResponse;
 import vn.thanhtuanle.auth.dto.ExchangeTokenResponse;
 import vn.thanhtuanle.common.enums.TokenType;
 import vn.thanhtuanle.common.enums.UserStatus;
@@ -47,13 +50,26 @@ import vn.thanhtuanle.repository.TokenRepository;
 import java.time.Instant;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -111,6 +127,8 @@ class UserUniquenessOnPostgresTest {
 
     /** Google's token endpoint. */
     @MockitoBean RestTemplate restTemplate;
+    /** The real allocator, held back or overridden where a test needs a lost handle race. */
+    @MockitoSpyBean HandleAllocator handleAllocator;
 
     @Value("${spring.security.oauth2.client.registration.google.client-id}")
     String googleClientId;
@@ -248,6 +266,90 @@ class UserUniquenessOnPostgresTest {
                 .isEqualTo("grace_" + tag + "_2");
     }
 
+    /**
+     * Two different people named alike sign up with Google at the same moment. Both pick the same free handle before
+     * either has written it; the second insert waits on {@code ux_users_username_lower}, is refused once the first
+     * commits, rolls back, and its retry, in a fresh transaction, takes the next free handle.
+     */
+    @Test
+    void twoConcurrentSignUpsWithTheSameNameGetTwoHandles() throws Exception {
+        String tag = letters();
+        String emailA = unique("hoa.a") + "@gmail.com";
+        String emailB = unique("hoa.b") + "@gmail.com";
+        googleAnswersByCode(Map.of("code-a", idToken(unique("sub"), emailA, "Hoa " + tag),
+                "code-b", idToken(unique("sub"), emailB, "Hoa " + tag)));
+        // Each sign-up's first pick waits until both have picked, so both pick the same handle.
+        CyclicBarrier bothPicked = new CyclicBarrier(2);
+        Set<String> picked = ConcurrentHashMap.newKeySet();
+        doAnswer(invocation -> {
+            Object handle = invocation.callRealMethod();
+            if (picked.add(Thread.currentThread().getName())) {
+                bothPicked.await(10, TimeUnit.SECONDS);
+            }
+            return handle;
+        }).when(handleAllocator).allocate(anyString());
+        long accounts = userRepository.count();
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            List<Future<AuthResponse>> signUps = List.of(
+                    pool.submit(() -> authService.authenticateGoogleUser("code-a", "verifier", "n-1",
+                            new ClientMeta("10.0.0.10", "dev-a", "pg/1.0"))),
+                    pool.submit(() -> authService.authenticateGoogleUser("code-b", "verifier", "n-1",
+                            new ClientMeta("10.0.0.11", "dev-b", "pg/1.0"))));
+            for (Future<AuthResponse> signUp : signUps) {
+                assertThat(signUp.get(30, TimeUnit.SECONDS).getAccessToken()).isNotNull();
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(userRepository.count()).isEqualTo(accounts + 2);
+        assertThat(List.of(userRepository.findLiveByEmail(emailA).orElseThrow().getUsername(),
+                userRepository.findLiveByEmail(emailB).orElseThrow().getUsername()))
+                .containsExactlyInAnyOrder("hoa_" + tag, "hoa_" + tag + "_2");
+    }
+
+    /** Every pick is refused by the index (three in all): the sign-up is refused with its reason and adds no account. */
+    @Test
+    void threeRefusedHandlesEndTheSignUpWithUsernameExisted() {
+        String taken = "taken_" + letters();
+        saved(taken, unique("taken") + "@corp.example");
+        doReturn(taken).when(handleAllocator).allocate(anyString());
+        long accounts = userRepository.count();
+        String email = unique("unlucky") + "@gmail.com";
+        googleAnswersFor(unique("sub"), email, "Unlucky");
+
+        assertThatThrownBy(() -> authService.authenticateGoogleUser("code", "verifier", "n-1",
+                new ClientMeta("10.0.0.12", "dev-12", "pg/1.0")))
+                .isInstanceOfSatisfying(AppException.class,
+                        e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USERNAME_EXISTED));
+        verify(handleAllocator, times(3)).allocate(anyString());
+        assertThat(userRepository.count()).isEqualTo(accounts);
+        assertThat(userRepository.findLiveByEmail(email)).isEmpty();
+    }
+
+    /** A verified id token for this Google account and display name. */
+    private String idToken(String sub, String email, String name) {
+        return new PlainJWT(new JWTClaimsSet.Builder()
+                .issuer("https://accounts.google.com").audience(googleClientId).subject(sub)
+                .expirationTime(Date.from(Instant.now().plusSeconds(3600)))
+                .claim("nonce", "n-1").claim("email", email).claim("email_verified", true).claim("name", name)
+                .build()).serialize();
+    }
+
+    /** Google's token endpoint answers each authorization code with its own id token. */
+    @SuppressWarnings("unchecked")
+    private void googleAnswersByCode(Map<String, String> idTokens) {
+        when(restTemplate.postForEntity(anyString(), any(HttpEntity.class), eq(ExchangeTokenResponse.class)))
+                .thenAnswer(invocation -> {
+                    MultiValueMap<String, String> form =
+                            (MultiValueMap<String, String>) invocation.<HttpEntity<?>>getArgument(1).getBody();
+                    return ResponseEntity.ok(new ExchangeTokenResponse(null, null, null, null, null,
+                            idTokens.get(form.getFirst("code"))));
+                });
+    }
+
     /** Lowercase letters only, so a display name "Name <tag>" asks for the handle "name_<tag>". */
     private static String letters() {
         return java.util.concurrent.ThreadLocalRandom.current().ints(8, 'a', 'z' + 1)
@@ -256,11 +358,7 @@ class UserUniquenessOnPostgresTest {
 
     /** Google's token endpoint answers with a verified id token for this Google account and display name. */
     private void googleAnswersFor(String sub, String email, String name) {
-        String idToken = new PlainJWT(new JWTClaimsSet.Builder()
-                .issuer("https://accounts.google.com").audience(googleClientId).subject(sub)
-                .expirationTime(Date.from(Instant.now().plusSeconds(3600)))
-                .claim("nonce", "n-1").claim("email", email).claim("email_verified", true).claim("name", name)
-                .build()).serialize();
+        String idToken = idToken(sub, email, name);
         when(restTemplate.postForEntity(anyString(), any(HttpEntity.class), eq(ExchangeTokenResponse.class)))
                 .thenReturn(ResponseEntity.ok(new ExchangeTokenResponse(null, null, null, null, null, idToken)));
     }
