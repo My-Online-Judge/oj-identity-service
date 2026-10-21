@@ -93,7 +93,7 @@ public class JwtUtil {
                     .setSubject("jwt-keypair-canary")
                     .signWith(rsaPrivateKey, SignatureAlgorithm.RS256)
                     .compact();
-            Jwts.parserBuilder().setSigningKey(rsaPublicKey).build().parseClaimsJws(canary);
+            Jwts.parser().setSigningKey(rsaPublicKey).build().parseClaimsJws(canary);
         } catch (Exception e) {
             // No key material in the message: only a fixed, human-readable diagnosis.
             throw new IllegalStateException("RSA private and public keys are not a matching pair", e);
@@ -230,7 +230,7 @@ public class JwtUtil {
 
     private Claims extractAllClaims(String token) {
         return Jwts
-                .parserBuilder()
+                .parser()
                 .setSigningKeyResolver(signingKeyResolver)
                 .setAllowedClockSkewSeconds(60)
                 .build()
