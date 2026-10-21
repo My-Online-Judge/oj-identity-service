@@ -19,7 +19,7 @@ public class GlobalExceptionHandler extends OjExceptionHandler {
 
     /**
      * A write that a unique index on users refused (a username or email taken in another case, or a write that raced
-     * another) answers 409 with the same message as the service's own check. Any other violation is a 500.
+     * another) answers 409 with the same message and {@code code} as the service's own check. Any other violation is a 500.
      */
     @ExceptionHandler(DataIntegrityViolationException.class)
     public ResponseEntity<ApiResponse<Object>> handleDataIntegrityViolation(DataIntegrityViolationException ex) {
@@ -27,7 +27,7 @@ public class GlobalExceptionHandler extends OjExceptionHandler {
                 .map(code -> {
                     log.warn("A unique index on users refused the write: {}", code.name());
                     return ResponseEntity.status(code.getStatusCode())
-                            .body(ApiResponse.error(code.getStatusCode().value(), code.getMessage()));
+                            .body(ApiResponse.error(code));
                 })
                 .orElseGet(() -> ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                         .body(handleGlobalException(ex)));

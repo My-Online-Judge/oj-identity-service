@@ -62,6 +62,7 @@ class UniqueUserConstraintsTest {
                 handler.handleDataIntegrityViolation(violationOf("ux_users_username_lower"));
         assertThat(conflict.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(conflict.getBody().getMessage()).isEqualTo("Username already exists");
+        assertThat(conflict.getBody().getCode()).isEqualTo("USERNAME_EXISTED");
 
         ResponseEntity<ApiResponse<Object>> other =
                 handler.handleDataIntegrityViolation(violationOf("ukdjdnp60wf0lq8erni3suse1np"));

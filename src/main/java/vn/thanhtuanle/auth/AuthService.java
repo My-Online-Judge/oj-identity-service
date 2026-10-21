@@ -685,8 +685,10 @@ public class AuthService {
      * <p>Not {@code @Transactional}: the sessions end in a transaction of their own, which is tried once more when the
      * user's row stays locked past the lock timeout. The caller clears the cookies whatever this answers, so giving up
      * at once would leave every other session alive with nothing left in the browser to retry from. Each try waits at
-     * most {@link UserRowLockImpl#LOGOUT_LOCK_TIMEOUT} (3 s) for the row, so the whole call takes at most about 6.5 s,
-     * under the portal's 10 s request timeout.
+     * most {@link UserRowLockImpl#LOGOUT_LOCK_TIMEOUT} (3 s) for the row. Redis adds up to 3 calls of at most 1 s each
+     * ({@code spring.data.redis.timeout}): the access token's blocklist entry, then the two revocation cutoffs written
+     * after the commit. The budget is therefore 2 x 3 s lock + up to 3 x 1 s Redis, about 9 s in the worst case (a held
+     * row and a slow Redis at once), still under the portal's 10 s request timeout.
      */
     public void logout(String refreshToken) {
         log.info("Logout request received");

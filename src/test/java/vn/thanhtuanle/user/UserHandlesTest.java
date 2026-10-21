@@ -43,6 +43,11 @@ class UserHandlesTest {
             "\u00C6sir \u0152uvre       | aesir_oeuvre",
             "\u00DE\u00F3r                | thor",
             "Y\u0131ld\u0131z             | yildiz",
+            "\uD835\uDC13\uD835\uDC2E\uD835\uDC1A\uD835\uDC27 | tuan",
+            "\u210C\u212Fllo \uD835\uDD7F\uD835\uDD94   | hello_to",
+            "\u0110\u1EE8C \u01A0N \u01AF\u1EDANG  | duc_on_uong",
+            "\u00D0\u0141\u00D8 \u1E9E\u00C6\u0152\u00DE | dlo_ssaeoeth",
+            "\u0130stanbul           | istanbul",
             "..                    | ''",
             "'   '                 | ''",
             "李小龙                  | ''",
@@ -168,5 +173,15 @@ class UserHandlesTest {
                 .isEqualTo("mai_lan");
         assertThat(UserHandles.allocate(HandleAllocator.sourceOf("x@gmail.com", "john.doe@gmail.com"),
                 handle -> false, new Random(1))).matches("user[0-9a-f]{6}");
+    }
+
+    /** A look-alike at sign (fullwidth or small) still marks an address, which is left out like any other. */
+    @Test
+    void anEmailWithALookAlikeAtSignIsLeftOutToo() {
+        assertThat(UserHandles.base(HandleAllocator.sourceOf("x@gmail.com", "john.doe\uFF20gmail.com"))).isEmpty();
+        assertThat(UserHandles.base(HandleAllocator.sourceOf("x@gmail.com", "Mai Lan (mai\uFE6Bexample.com)")))
+                .isEqualTo("mai_lan");
+        assertThat(UserHandles.base(HandleAllocator.sourceOf("x@gmail.com", "\uFF2A\uFF4F\uFF48\uFF4E\u3000"
+                + "j\uFF20x\uFF0Ecom"))).isEqualTo("john");
     }
 }

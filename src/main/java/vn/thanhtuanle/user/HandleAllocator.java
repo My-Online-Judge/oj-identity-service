@@ -3,6 +3,7 @@ package vn.thanhtuanle.user;
 import org.springframework.stereotype.Component;
 
 import java.security.SecureRandom;
+import java.text.Normalizer;
 import java.util.random.RandomGenerator;
 import java.util.regex.Pattern;
 
@@ -10,7 +11,7 @@ import java.util.regex.Pattern;
 @Component
 public class HandleAllocator {
 
-    /** Anything shaped like an email address. */
+    /** Anything shaped like an email address, matched on the NFKC form so a fullwidth {@code ＠} counts too. */
     private static final Pattern EMAIL_LIKE = Pattern.compile("\\S+@\\S+");
 
     private final UserRepository userRepository;
@@ -33,10 +34,12 @@ public class HandleAllocator {
      * What a handle is made from: the Google display name, or {@code ""} when it is blank (the handle is then
      * {@code user} + random hex). Never the email: a handle is public, and an address or its local part would tell
      * anyone how to reach the account's owner. {@code email} is deliberately unused, and an address inside the name
-     * (some Google accounts carry theirs as their name) is left out too.
+     * (some Google accounts carry theirs as their name) is left out too. The name is put in NFKC first, so a look-alike
+     * {@code ＠} or {@code ﹫} and compatibility spaces count; {@link UserHandles#base} decomposes it again anyway.
      */
     public static String sourceOf(String email, String name) {
-        String withoutAddresses = name == null ? "" : EMAIL_LIKE.matcher(name).replaceAll(" ");
+        String withoutAddresses = name == null ? ""
+                : EMAIL_LIKE.matcher(Normalizer.normalize(name, Normalizer.Form.NFKC)).replaceAll(" ");
         return withoutAddresses.isBlank() ? "" : withoutAddresses;
     }
 }

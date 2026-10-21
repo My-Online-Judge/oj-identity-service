@@ -27,7 +27,10 @@ import java.util.UUID;
 public class UserRowLockImpl implements UserRowLock {
 
     static final Duration LOCK_TIMEOUT = Duration.ofSeconds(5);
-    /** Logout tries twice, so two waits stay under the portal's 10 s request timeout. */
+    /**
+     * Logout tries twice. Its budget is 2 x 3 s lock + up to 3 x 1 s Redis (see {@code AuthService.logout}), under the
+     * portal's 10 s request timeout.
+     */
     public static final Duration LOGOUT_LOCK_TIMEOUT = Duration.ofSeconds(3);
 
     @PersistenceContext

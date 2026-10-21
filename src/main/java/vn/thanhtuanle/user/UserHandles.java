@@ -42,8 +42,9 @@ public final class UserHandles {
             'ß', "ss", 'æ', "ae", 'œ', "oe", 'þ', "th");
 
     /**
-     * The handle a name asks for: lower case, diacritics removed (NFKD, so fullwidth forms and ligatures become their
-     * letters, combining marks dropped, and {@link #LETTERS} spelled out), each run of anything outside {@code [a-z0-9]} one {@code _}, no {@code _} at either end, at most
+     * The handle a name asks for: diacritics removed (NFKD, so fullwidth forms, ligatures and styled letters become
+     * their letters), then lower case (after NFKD, so {@code 𝐓𝐮𝐚𝐧} is {@code tuan}), combining marks dropped and
+     * {@link #LETTERS} spelled out; each run of anything outside {@code [a-z0-9]} one {@code _}, no {@code _} at either end, at most
      * {@link #MAX_BASE} characters (a {@code _} left at the cut is dropped). Shorter than 3: {@code user_} + it. Empty
      * when nothing usable remains (no name, or only punctuation or other scripts): {@link #allocate} then gives
      * {@code user} + 6 random hex digits.
@@ -52,7 +53,9 @@ public final class UserHandles {
         if (source == null) {
             return "";
         }
-        String decomposed = MARKS.matcher(Normalizer.normalize(source.toLowerCase(Locale.ROOT), Normalizer.Form.NFKD))
+        // Lower case after NFKD: styled capitals (mathematical bold, letterlike symbols) have no lower-case mapping of
+        // their own and only become ASCII capitals in the decomposition. Marks go last, in case lower-casing adds one.
+        String decomposed = MARKS.matcher(Normalizer.normalize(source, Normalizer.Form.NFKD).toLowerCase(Locale.ROOT))
                 .replaceAll("");
         StringBuilder folded = new StringBuilder(decomposed.length());
         for (char c : decomposed.toCharArray()) {
