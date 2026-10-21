@@ -33,7 +33,10 @@ import vn.thanhtuanle.user.UserLockTimeoutException;
 import vn.thanhtuanle.user.UserRepository;
 import vn.thanhtuanle.user.mapper.UserMapper;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Optional;
 import java.util.concurrent.Semaphore;
 import java.util.UUID;
@@ -41,6 +44,8 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -60,6 +65,9 @@ class AuthServicePasswordLoginTest {
 
     private final PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
     @Spy TransactionTemplate transactionTemplate = new TransactionTemplate(transactionManager);
+
+    private static final Instant NOW = Instant.parse("2026-10-21T01:02:03.500Z");
+    @Spy Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
 
     @InjectMocks AuthService authService;
 
@@ -83,7 +91,7 @@ class AuthServicePasswordLoginTest {
         User u = admin(CommonStatus.ACTIVE.getValue(), HASH);
         when(userRepository.findByUsername("admin")).thenReturn(Optional.of(u));
         when(passwordEncoder.matches("secret", HASH)).thenReturn(true);
-        when(jwtUtil.generateToken(u)).thenReturn("AT");
+        when(jwtUtil.generateToken(eq(u), anyLong())).thenReturn("AT");
         when(jwtUtil.generateRefreshToken(u)).thenReturn("RT");
         when(userRepository.lockById(u.getId())).thenReturn(Optional.of(u));
 
@@ -100,7 +108,7 @@ class AuthServicePasswordLoginTest {
         User u = admin(CommonStatus.ACTIVE.getValue(), HASH);
         when(userRepository.findByUsername("admin")).thenReturn(Optional.of(u));
         when(passwordEncoder.matches("secret", HASH)).thenReturn(true);
-        when(jwtUtil.generateToken(u)).thenReturn("AT");
+        when(jwtUtil.generateToken(eq(u), anyLong())).thenReturn("AT");
         when(jwtUtil.generateRefreshToken(u)).thenReturn("RT");
         when(userRepository.lockById(u.getId())).thenReturn(Optional.of(u));
 
@@ -122,7 +130,7 @@ class AuthServicePasswordLoginTest {
         assertThatThrownBy(() -> authService.authenticateWithPassword("admin", "wrong", META))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USER_NOT_EXISTED));
-        verify(jwtUtil, never()).generateToken(any());
+        verify(jwtUtil, never()).generateToken(any(), anyLong());
     }
 
     @Test
@@ -142,7 +150,7 @@ class AuthServicePasswordLoginTest {
 
         assertThatThrownBy(() -> authService.authenticateWithPassword("admin", "x", META))
                 .isInstanceOf(AppException.class);
-        verify(jwtUtil, never()).generateToken(any());
+        verify(jwtUtil, never()).generateToken(any(), anyLong());
     }
 
     @Test
@@ -150,7 +158,7 @@ class AuthServicePasswordLoginTest {
         User u = admin(CommonStatus.ACTIVE.getValue(), HASH);
         when(userRepository.findByUsername("admin")).thenReturn(Optional.of(u));
         when(passwordEncoder.matches("secret", HASH)).thenReturn(true);
-        when(jwtUtil.generateToken(u)).thenReturn("AT");
+        when(jwtUtil.generateToken(eq(u), anyLong())).thenReturn("AT");
         when(jwtUtil.generateRefreshToken(u)).thenReturn("RT");
         when(userRepository.lockById(u.getId())).thenReturn(Optional.of(u));
 
@@ -171,7 +179,7 @@ class AuthServicePasswordLoginTest {
         User u = admin(CommonStatus.ACTIVE.getValue(), HASH);
         when(userRepository.findByUsername("admin")).thenReturn(Optional.of(u));
         when(passwordEncoder.matches("secret", HASH)).thenReturn(true);
-        when(jwtUtil.generateToken(u)).thenReturn("AT");
+        when(jwtUtil.generateToken(eq(u), anyLong())).thenReturn("AT");
         when(jwtUtil.generateRefreshToken(u)).thenReturn("RT");
         when(userRepository.lockById(u.getId())).thenReturn(Optional.of(u));
 
@@ -343,7 +351,7 @@ class AuthServicePasswordLoginTest {
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USER_NOT_EXISTED));
         verify(tokenRepository, never()).save(any());
-        verify(jwtUtil, never()).generateToken(any());
+        verify(jwtUtil, never()).generateToken(any(), anyLong());
     }
 
     @Test
@@ -355,6 +363,29 @@ class AuthServicePasswordLoginTest {
         assertThatThrownBy(() -> authService.authenticateWithPassword("admin", "secret", META))
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USER_BLOCKED));
-        verify(jwtUtil, never()).generateToken(any());
+        verify(jwtUtil, never()).generateToken(any(), anyLong());
+    }
+
+    /**
+     * The access token's issue time is read before the lock that loads the user's roles: a role change committed after
+     * that read is revoked by the millisecond cutoff, even though the token is minted after the cutoff was written.
+     */
+    @Test
+    void theAccessTokenIsIssuedAtTheReadBeforeTheUsersStateIsLoaded() {
+        User u = admin(CommonStatus.ACTIVE.getValue(), HASH);
+        when(userRepository.findByUsername("admin")).thenReturn(Optional.of(u));
+        when(passwordEncoder.matches("secret", HASH)).thenReturn(true);
+        when(userRepository.lockById(u.getId())).thenAnswer(invocation -> {
+            // Time passes between the state read and the mint.
+            // Lenient: an implementation that reads the clock in the right place never asks again.
+            lenient().doReturn(NOW.toEpochMilli() + 5).when(clock).millis();
+            return Optional.of(u);
+        });
+        when(jwtUtil.generateToken(eq(u), anyLong())).thenReturn("AT");
+        when(jwtUtil.generateRefreshToken(u)).thenReturn("RT");
+
+        authService.authenticateWithPassword("admin", "secret", META);
+
+        verify(jwtUtil).generateToken(u, NOW.toEpochMilli());
     }
 }

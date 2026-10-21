@@ -160,7 +160,16 @@ public class JwtUtil {
      * millisecond revocation cutoff, so a login later in the same second as a logout keeps its token.
      */
     public String generateToken(User user) {
-        long now = clock.millis();
+        return generateToken(user, clock.millis());
+    }
+
+    /**
+     * {@link #generateToken(User)} issued at {@code issuedAtMillis}. A caller that loads the user's roles passes the time
+     * it read before loading them: a token must not claim to be newer than the state it carries, or a role change
+     * committed in between would escape the millisecond cutoff. {@code exp} counts from the same instant.
+     */
+    public String generateToken(User user, long issuedAtMillis) {
+        long now = issuedAtMillis;
         Map<String, Object> claims = new HashMap<>();
         claims.put(OjJwtDecoders.UID_CLAIM, user.getId().toString());
         claims.put(OjJwtAuthenticationFilter.AUTHORITIES_CLAIM, new SecurityUserDetails(user).getAuthorities().stream()

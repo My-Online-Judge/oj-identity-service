@@ -62,9 +62,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -187,7 +190,7 @@ class AuthServiceGoogleTest {
     }
 
     private void mints(User u) {
-        when(jwtUtil.generateToken(u)).thenReturn("AT");
+        when(jwtUtil.generateToken(eq(u), anyLong())).thenReturn("AT");
         when(jwtUtil.generateRefreshToken(u)).thenReturn("RT");
     }
 
@@ -470,7 +473,7 @@ class AuthServiceGoogleTest {
         });
         when(handleAllocator.allocate("Alice")).thenReturn("alice");
         ArgumentCaptor<User> created = ArgumentCaptor.forClass(User.class);
-        when(jwtUtil.generateToken(created.capture())).thenReturn("AT");
+        when(jwtUtil.generateToken(created.capture(), anyLong())).thenReturn("AT");
         when(jwtUtil.generateRefreshToken(any(User.class))).thenReturn("RT");
 
         AuthResponse res = authService.authenticateGoogleUser(CODE, VERIFIER, NONCE, META);
@@ -576,7 +579,7 @@ class AuthServiceGoogleTest {
             saved.add(user);
             return user;
         });
-        when(jwtUtil.generateToken(any(User.class))).thenReturn("AT");
+        when(jwtUtil.generateToken(any(User.class), anyLong())).thenReturn("AT");
         when(jwtUtil.generateRefreshToken(any(User.class))).thenReturn("RT");
         return saved;
     }
@@ -650,7 +653,7 @@ class AuthServiceGoogleTest {
         when(userRepository.lockById(u.getId())).thenReturn(Optional.of(u));
         when(handleAllocator.allocate("Alice")).thenReturn("alice");
         AtomicReference<String> mintedFor = new AtomicReference<>();
-        when(jwtUtil.generateToken(any(User.class))).thenAnswer(invocation -> {
+        when(jwtUtil.generateToken(any(User.class), anyLong())).thenAnswer(invocation -> {
             mintedFor.set(invocation.<User>getArgument(0).getUsername());
             return "AT";
         });
@@ -664,7 +667,7 @@ class AuthServiceGoogleTest {
         // Flushed at once, so a unique index that refuses the handle does so inside the transaction.
         InOrder order = inOrder(userRepository, jwtUtil);
         order.verify(userRepository).saveAndFlush(u);
-        order.verify(jwtUtil).generateToken(u);
+        order.verify(jwtUtil).generateToken(eq(u), anyLong());
     }
 
     /** The straggler's handle lost a race: the sign-in reads the account again and takes the next free handle. */
@@ -681,7 +684,7 @@ class AuthServiceGoogleTest {
             flushed.add(invocation.getArgument(0));
             return invocation.getArgument(0);
         });
-        when(jwtUtil.generateToken(any(User.class))).thenReturn("AT");
+        when(jwtUtil.generateToken(any(User.class), anyLong())).thenReturn("AT");
         when(jwtUtil.generateRefreshToken(any(User.class))).thenReturn("RT");
 
         assertThat(authService.authenticateGoogleUser(CODE, VERIFIER, NONCE, META).getAccessToken()).isEqualTo("AT");
@@ -696,5 +699,23 @@ class AuthServiceGoogleTest {
         u.setId(id);
         u.setUsername("old@gmail.com");
         return u;
+    }
+
+    /** The access token's issue time is read before the lock that loads the account's roles (see I1). */
+    @Test
+    void theAccessTokenIsIssuedAtTheReadBeforeTheAccountsStateIsLoaded() {
+        googleAnswers(idToken(true));
+        User u = account(SUB);
+        when(userRepository.findLiveByGoogleId(SUB)).thenReturn(Optional.of(u));
+        when(userRepository.lockById(u.getId())).thenAnswer(invocation -> {
+            // Lenient: an implementation that reads the clock in the right place never asks again.
+            lenient().doReturn(NOW.toEpochMilli() + 5).when(clock).millis();
+            return Optional.of(u);
+        });
+        mints(u);
+
+        authService.authenticateGoogleUser(CODE, VERIFIER, NONCE, META);
+
+        verify(jwtUtil).generateToken(u, NOW.toEpochMilli());
     }
 }

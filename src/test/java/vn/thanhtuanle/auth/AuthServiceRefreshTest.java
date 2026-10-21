@@ -34,7 +34,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -68,7 +72,7 @@ class AuthServiceRefreshTest {
     private User arrangeValidRefresh(String refreshToken, UUID userId) {
         User user = arrangeStoredRefresh(refreshToken, userId);
         when(tokenRepository.markRotated(storedId, now())).thenReturn(1);
-        when(jwtUtil.generateToken(user)).thenReturn("new.access.token");
+        when(jwtUtil.generateToken(eq(user), anyLong())).thenReturn("new.access.token");
         when(jwtUtil.extractExpiration(refreshToken)).thenReturn(SESSION_END);
         when(jwtUtil.generateRefreshToken(user, SESSION_END)).thenReturn("new.refresh.token");
         return user;
@@ -175,7 +179,7 @@ class AuthServiceRefreshTest {
 
         assertThat(response.getAccessToken()).isNull();
         assertThat(response.getRefreshToken()).isNull();
-        verify(jwtUtil, never()).generateToken(any());
+        verify(jwtUtil, never()).generateToken(any(), anyLong());
         verify(tokenRepository, never()).save(any());
         verify(tokenRepository, never()).deleteAllByUserIdAndTokenType(any(), any());
     }
@@ -189,7 +193,7 @@ class AuthServiceRefreshTest {
 
         // No second read by the token's subject: the status checked is the one read under the lock.
         verify(userRepository, never()).findByUsername(any());
-        verify(jwtUtil).generateToken(locked);
+        verify(jwtUtil).generateToken(eq(locked), anyLong());
     }
 
     @Test
@@ -214,9 +218,26 @@ class AuthServiceRefreshTest {
                 .isInstanceOfSatisfying(AppException.class,
                         e -> assertThat(e.getErrorCode()).isEqualTo(ErrorCode.USER_BLOCKED));
 
-        verify(jwtUtil, never()).generateToken(any());
+        verify(jwtUtil, never()).generateToken(any(), anyLong());
         verify(tokenRepository, never()).markRotated(any(), any());
         verify(tokenRepository, never()).save(any());
         verify(tokenRepository, never()).deleteAllByUserIdAndTokenType(any(), any());
+    }
+
+    /** The successor access token's issue time is read before the lock that loads the user's roles (see I1). */
+    @Test
+    void refresh_issuesTheAccessTokenAtTheReadBeforeTheUsersStateIsLoaded() {
+        UUID userId = UUID.randomUUID();
+        User user = arrangeValidRefresh("valid.refresh.token", userId);
+        long beforeTheLock = clock.millis();
+        when(userRepository.lockById(userId)).thenAnswer(invocation -> {
+            // Lenient: an implementation that reads the clock in the right place never asks again.
+            lenient().doReturn(beforeTheLock + 5).when(clock).millis();
+            return Optional.of(user);
+        });
+
+        authService.refreshAccessToken("valid.refresh.token", META);
+
+        verify(jwtUtil).generateToken(user, beforeTheLock);
     }
 }

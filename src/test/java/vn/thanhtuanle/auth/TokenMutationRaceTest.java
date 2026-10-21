@@ -56,6 +56,7 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -267,7 +268,7 @@ class TokenMutationRaceTest {
                 release.await(20, TimeUnit.SECONDS);
             }
             return invocation.callRealMethod();
-        }).when(jwtUtil).generateToken(any());
+        }).when(jwtUtil).generateToken(any(), anyLong());
 
         Future<AuthResponse> refresh = first.submit(() -> authService.refreshAccessToken(session.refreshToken(), META));
         assertThat(rotated.await(10, TimeUnit.SECONDS)).isTrue();
@@ -296,7 +297,7 @@ class TokenMutationRaceTest {
                 release.await(20, TimeUnit.SECONDS);
             }
             return invocation.callRealMethod();
-        }).when(jwtUtil).generateToken(any());
+        }).when(jwtUtil).generateToken(any(), anyLong());
 
         Future<AuthResponse> refresh = first.submit(() -> authService.refreshAccessToken(session.refreshToken(), META));
         assertThat(rotated.await(10, TimeUnit.SECONDS)).isTrue();
@@ -330,7 +331,7 @@ class TokenMutationRaceTest {
                 release.await(20, TimeUnit.SECONDS);
             }
             return invocation.callRealMethod();
-        }).when(jwtUtil).generateToken(any());
+        }).when(jwtUtil).generateToken(any(), anyLong());
 
         Future<AuthResponse> a = first.submit(
                 () -> authService.authenticateGoogleUser("code", "verifier", "race-nonce", META));

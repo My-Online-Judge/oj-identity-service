@@ -334,6 +334,8 @@ public class AuthService {
      * the copy read before the transaction.
      */
     private AuthResponse startGoogleSession(GoogleMatch match, GoogleIdentity google, ClientMeta meta) {
+        // Read before the account (and its roles) is loaded: see refreshAccessToken.
+        long issuedAt = clock.millis();
         User user = match.userId() == null ? newAccount(google)
                 : match.bySub() ? accountLinkedTo(match.userId(), google)
                 : accountWithEmail(match.userId(), google);
@@ -345,7 +347,7 @@ public class AuthService {
         }
         giveHandleIfEmailNamed(user);
 
-        String accessToken = jwtUtil.generateToken(user);
+        String accessToken = jwtUtil.generateToken(user, issuedAt);
         String refreshToken = jwtUtil.generateRefreshToken(user);
 
         revokeAllUserTokens(user);
@@ -533,12 +535,14 @@ public class AuthService {
      * is written (the transaction rolls back) and the login fails like a wrong password, so it reveals nothing new.
      */
     private AuthResponse startPasswordSession(UUID userId, String verifiedHash, ClientMeta meta) {
+        // Read before the user's roles are loaded: see refreshAccessToken.
+        long issuedAt = clock.millis();
         User user = userRepository.lockById(userId).orElseThrow(() -> new AppException(ErrorCode.USER_NOT_EXISTED));
         if (!Objects.equals(user.getPassword(), verifiedHash)
                 || !Objects.equals(user.getStatus(), CommonStatus.ACTIVE.getValue())) {
             throw new AppException(ErrorCode.USER_NOT_EXISTED);
         }
-        String accessToken = jwtUtil.generateToken(user);
+        String accessToken = jwtUtil.generateToken(user, issuedAt);
         String refreshToken = jwtUtil.generateRefreshToken(user);
 
         revokeAllUserTokens(user);
@@ -610,6 +614,10 @@ public class AuthService {
         // Serialise with every other token change of this user. A concurrent refresh that won meanwhile leaves this
         // one's markRotated at 0 below; a logout that won leaves no row for it to rotate. The status gate and the
         // minting use this row, read under the lock.
+        // The access token's issue time is read before that row and its roles are: a role or permission change takes
+        // no user-row lock, so it can commit between the read and the mint. Its millisecond cutoff then still revokes
+        // the token, which carries the old roles; a token stamped at the mint would postdate the cutoff and escape it.
+        long issuedAt = clock.millis();
         User user = userRepository.lockById(stored.getUser().getId())
                 .orElseThrow(() -> new AppException(ErrorCode.USER_NOT_EXISTED));
 
@@ -639,7 +647,7 @@ public class AuthService {
             return AuthResponse.builder().build();
         }
 
-        String newAccessToken = jwtUtil.generateToken(user);
+        String newAccessToken = jwtUtil.generateToken(user, issuedAt);
         String newRefreshToken = jwtUtil.generateRefreshToken(user, sessionEnd);
         // One ACCESS row per live session: at a 15-minute TTL, appending a row per
         // refresh would add ~96 rows/user/day that nothing cleans up until the next login.
