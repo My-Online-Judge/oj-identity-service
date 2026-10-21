@@ -4,6 +4,8 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -14,6 +16,7 @@ import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 import vn.thanhtuanle.auth.AuthCookies;
 import vn.thanhtuanle.config.SecurityConfig;
 import vn.thanhtuanle.oj.common.security.OjJwtAuthenticationFilter;
@@ -31,6 +34,7 @@ import java.nio.file.Path;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -71,14 +75,14 @@ class PublicProfileControllerTest {
     void anonymousReadsAProfileWithoutPrivateFields() throws Exception {
         UUID id = UUID.randomUUID();
         when(userService.publicProfile("alice")).thenReturn(
-                new PublicProfileResponse(id, "alice", "Alice", "a.png", LocalDateTime.of(2026, 1, 2, 3, 4)));
+                new PublicProfileResponse(id, "alice", "Alice", LocalDateTime.of(2026, 1, 2, 3, 4)));
 
         mockMvc.perform(get("/api/v1/users/public/alice"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.id").value(id.toString()))
                 .andExpect(jsonPath("$.data.username").value("alice"))
                 .andExpect(jsonPath("$.data.name").value("Alice"))
-                .andExpect(jsonPath("$.data.avatar").value("a.png"))
+                .andExpect(jsonPath("$.data.avatar").doesNotExist())
                 .andExpect(jsonPath("$.data.createdAt").exists())
                 .andExpect(jsonPath("$.data.email").doesNotExist())
                 .andExpect(jsonPath("$.data.roles").doesNotExist())
@@ -100,7 +104,7 @@ class PublicProfileControllerTest {
         UUID a = UUID.randomUUID();
         UUID b = UUID.randomUUID();
         when(userService.publicProfiles(List.of(a, b))).thenReturn(List.of(
-                new PublicProfileResponse(a, "alice", "Alice", null, LocalDateTime.of(2026, 1, 2, 3, 4))));
+                new PublicProfileResponse(a, "alice", "Alice", LocalDateTime.of(2026, 1, 2, 3, 4))));
 
         mockMvc.perform(get("/api/v1/users/public").param("ids", a + "," + b))
                 .andExpect(status().isOk())
@@ -167,38 +171,54 @@ class PublicProfileControllerTest {
     }
 
     @Test
-    void anEmailPathResolvesForSubmissionService() throws Exception {
-        UUID id = UUID.randomUUID();
-        when(userService.publicProfile(EMAIL)).thenReturn(
-                new PublicProfileResponse(id, null, "Alice", null, LocalDateTime.of(2026, 1, 2, 3, 4)));
+    void anEmailShapedNameIs404EvenForAnInternalPeer() throws Exception {
+        // No problem-service leaf is signed by the test CA; a CN is all the old exception read.
+        X509Certificate problemService = mock(X509Certificate.class);
+        when(problemService.getSubjectX500Principal()).thenReturn(new X500Principal("CN=problem-service"));
 
-        mockMvc.perform(get("/api/v1/users/public/" + EMAIL)
-                        .requestAttr(CERT_ATTRIBUTE, peer("submission-service.crt")))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.id").value(id.toString()))
-                .andExpect(jsonPath("$.data.username").doesNotExist());
+        for (X509Certificate[] chain : List.of(peer("submission-service.crt"), new X509Certificate[] {problemService})) {
+            mockMvc.perform(get("/api/v1/users/public/" + EMAIL).requestAttr(CERT_ATTRIBUTE, chain))
+                    .andExpect(status().isNotFound())
+                    .andExpect(jsonPath("$.message").value("User not found"));
+        }
+        verifyNoInteractions(userService);
     }
 
     @Test
-    void anEmailPathResolvesForProblemService() throws Exception {
-        // No problem-service leaf is signed by the test CA; the check reads the CN only.
-        X509Certificate problemService = mock(X509Certificate.class);
-        when(problemService.getSubjectX500Principal()).thenReturn(new X500Principal("CN=problem-service"));
-        UUID id = UUID.randomUUID();
-        when(userService.publicProfile(EMAIL)).thenReturn(
-                new PublicProfileResponse(id, null, "Alice", null, LocalDateTime.of(2026, 1, 2, 3, 4)));
+    void noPublicReadCarriesAnAvatarOrAnEmail() throws Exception {
+        UUID a = UUID.randomUUID();
+        UUID b = UUID.randomUUID();
+        LocalDateTime at = LocalDateTime.of(2026, 1, 2, 3, 4);
+        when(userService.publicProfile("alice")).thenReturn(new PublicProfileResponse(a, "alice", "Alice", at));
+        when(userService.publicProfiles(List.of(a, b))).thenReturn(List.of(
+                new PublicProfileResponse(a, "alice", "Alice", at), new PublicProfileResponse(b, "bob", "Bob", at)));
 
-        mockMvc.perform(get("/api/v1/users/public/" + EMAIL)
-                        .requestAttr(CERT_ATTRIBUTE, new X509Certificate[] {problemService}))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.id").value(id.toString()));
+        JsonNode one = data(mockMvc.perform(get("/api/v1/users/public/alice")).andExpect(status().isOk()).andReturn());
+        JsonNode many = data(mockMvc.perform(get("/api/v1/users/public").param("ids", a + "," + b))
+                .andExpect(status().isOk()).andReturn());
+
+        assertThat(keys(one)).containsExactlyInAnyOrder("id", "username", "name", "createdAt");
+        assertThat(many).hasSize(2);
+        for (JsonNode item : many) {
+            assertThat(keys(item)).containsExactlyInAnyOrder("id", "username", "name", "createdAt");
+        }
+    }
+
+    private static JsonNode data(MvcResult result) throws Exception {
+        return new ObjectMapper().readTree(result.getResponse().getContentAsString()).get("data");
+    }
+
+    private static List<String> keys(JsonNode node) {
+        List<String> keys = new ArrayList<>();
+        node.fieldNames().forEachRemaining(keys::add);
+        return keys;
     }
 
     @Test
     void aNormalPathWorksForEveryCaller() throws Exception {
         UUID id = UUID.randomUUID();
         when(userService.publicProfile("alice")).thenReturn(
-                new PublicProfileResponse(id, "alice", "Alice", null, LocalDateTime.of(2026, 1, 2, 3, 4)));
+                new PublicProfileResponse(id, "alice", "Alice", LocalDateTime.of(2026, 1, 2, 3, 4)));
 
         for (X509Certificate[] chain : Arrays.asList(null, peer("api-gateway.crt"), peer("submission-service.crt"))) {
             var request = get("/api/v1/users/public/alice");

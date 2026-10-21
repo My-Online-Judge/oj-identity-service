@@ -1,5 +1,7 @@
 package vn.thanhtuanle.user;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -21,6 +23,7 @@ import vn.thanhtuanle.oj.common.security.OjJwtDecoders;
 import vn.thanhtuanle.oj.common.web.error.ResourceNotFoundException;
 import vn.thanhtuanle.user.dto.PublicProfileResponse;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.UUID;
@@ -65,6 +68,7 @@ class UserServicePublicProfileTest {
 
     @Autowired UserService userService;
     @Autowired UserRepository userRepository;
+    @Autowired ObjectMapper objectMapper;
 
     private static String unique(String prefix) {
         return prefix + "_" + UUID.randomUUID().toString().substring(0, 8);
@@ -76,7 +80,7 @@ class UserServicePublicProfileTest {
                 .roles(new HashSet<>()).build());
     }
 
-    /** A Google sign-up: its username is its email address (AuthService.newAccount). */
+    /** A Google sign-up from before V8, whose username was its email address. */
     private User googleStyle() {
         String email = unique("student") + "@gmail.com";
         return userRepository.save(User.builder().username(email).name("Student").avatar("g.png").email(email)
@@ -93,7 +97,6 @@ class UserServicePublicProfileTest {
         assertThat(profile.id()).isEqualTo(alice.getId());
         assertThat(profile.username()).isEqualTo(username);
         assertThat(profile.name()).isEqualTo("Name " + username);
-        assertThat(profile.avatar()).isEqualTo("av.png");
         assertThat(profile.createdAt()).isNotNull();
     }
 
@@ -151,7 +154,6 @@ class UserServicePublicProfileTest {
         assertThat(profile.id()).isEqualTo(student.getId());
         assertThat(profile.username()).isNull();
         assertThat(profile.name()).isEqualTo("Student");
-        assertThat(profile.avatar()).isEqualTo("g.png");
         assertThat(profile.createdAt()).isNotNull();
     }
 
@@ -168,5 +170,20 @@ class UserServicePublicProfileTest {
                 .containsExactlyInAnyOrder(
                         tuple(student.getId(), null, "Student"),
                         tuple(bob.getId(), handle, "Name " + handle));
+    }
+
+    @Test
+    void anAccountWithAnAvatarStillHasNoneInPublic() throws Exception {
+        User alice = saved(unique("alice"), UserStatus.ACTIVE.getValue());
+        assertThat(alice.getAvatar()).isEqualTo("av.png");
+
+        for (PublicProfileResponse profile : List.of(userService.publicProfile(alice.getUsername()),
+                userService.publicProfiles(List.of(alice.getId())).get(0))) {
+            JsonNode json = objectMapper.valueToTree(profile);
+            List<String> keys = new ArrayList<>();
+            json.fieldNames().forEachRemaining(keys::add);
+            assertThat(keys).containsExactlyInAnyOrder("id", "username", "name", "createdAt");
+            assertThat(json.toString()).doesNotContain("av.png");
+        }
     }
 }

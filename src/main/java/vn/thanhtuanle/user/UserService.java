@@ -96,10 +96,13 @@ public class UserService {
         return userRepository.findLiveByIdIn(ids).stream().map(UserService::toPublicProfile).toList();
     }
 
-    /** Email is never public: a username with an '@' (a Google sign-up's is its address) is left out, never derived. */
+    /**
+     * Email is never public: a username with an '@' is left out, never derived. Since V8 no live username has one; the
+     * guard stays as defence in depth. The avatar is never public either (see {@link PublicProfileResponse}).
+     */
     private static PublicProfileResponse toPublicProfile(User u) {
         String username = u.getUsername() == null || u.getUsername().contains("@") ? null : u.getUsername();
-        return new PublicProfileResponse(u.getId(), username, u.getName(), u.getAvatar(), u.getCreatedAt());
+        return new PublicProfileResponse(u.getId(), username, u.getName(), u.getCreatedAt());
     }
 
     // ----- create -----
