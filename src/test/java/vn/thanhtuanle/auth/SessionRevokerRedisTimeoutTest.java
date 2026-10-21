@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
@@ -63,7 +64,7 @@ class SessionRevokerRedisTimeoutTest {
                         "spring.data.redis.port=" + silentRedis.getLocalPort())
                 .run(context -> {
                     SessionRevoker revoker = new SessionRevoker(context.getBean(StringRedisTemplate.class), 900_000L,
-                            Duration.ofHours(25));
+                            Duration.ofHours(25), Clock.systemUTC());
                     long start = System.nanoTime();
 
                     // Outside a transaction the write happens right away; it fails and is only logged.

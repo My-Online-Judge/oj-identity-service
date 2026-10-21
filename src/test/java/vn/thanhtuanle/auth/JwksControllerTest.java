@@ -10,6 +10,7 @@ import vn.thanhtuanle.common.util.JwtUtil;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.time.Clock;
 import java.util.Base64;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -28,7 +29,7 @@ class JwksControllerTest {
         KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
         generator.initialize(2048);
         KeyPair pair = generator.generateKeyPair();
-        JwtUtil jwtUtil = new JwtUtil();
+        JwtUtil jwtUtil = new JwtUtil(Clock.systemUTC());
         ReflectionTestUtils.setField(jwtUtil, "rsaPrivateKeyPem", pemBase64("PRIVATE KEY", pair.getPrivate().getEncoded()));
         ReflectionTestUtils.setField(jwtUtil, "rsaPublicKeyPem", pemBase64("PUBLIC KEY", pair.getPublic().getEncoded()));
         ReflectionTestUtils.invokeMethod(jwtUtil, "init");

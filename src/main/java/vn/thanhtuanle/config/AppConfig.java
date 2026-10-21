@@ -26,7 +26,8 @@ public class AppConfig {
         return builder.connectTimeout(connectTimeout).readTimeout(readTimeout).redirects(Redirects.DONT_FOLLOW).build();
     }
 
-    /** Time source for refresh rotation; tests replace it to step past the reuse grace. */
+    /** Time source for refresh rotation, token issue times and revocation cutoffs; tests replace it to step past the
+     * reuse grace. */
     @Bean
     public Clock clock() {
         return Clock.systemDefaultZone();

@@ -7,7 +7,9 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import vn.thanhtuanle.oj.common.redis.RedisKeys;
+import vn.thanhtuanle.oj.common.security.RevocationCutoffs;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
@@ -15,8 +17,11 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Revokes every access token a user holds by recording a cutoff ({@link RedisKeys#tokenRevokedBefore});
- * the gateway strips any token whose {@code iat} is older than it.
+ * Revokes every access token a user holds by recording two cutoffs from one instant, with one TTL:
+ * {@link RedisKeys#tokenRevokedBefore} in whole seconds and {@link RedisKeys#tokenRevokedBeforeMillis} in
+ * milliseconds ({@link RevocationCutoffs}). The gateway strips a token whose {@code iat_ms} is older than the
+ * millisecond cutoff, or, for a token without {@code iat_ms} or with no millisecond cutoff (an older identity or
+ * gateway), whose {@code iat} is older than the seconds cutoff.
  * A per-user timestamp — not a jti list from {@code t_tokens} — also catches tokens that a refresh
  * already replaced but that are still unexpired.
  *
@@ -38,11 +43,14 @@ public class SessionRevoker {
 
     private final StringRedisTemplate redis;
     private final Duration markerTtl;
+    private final Clock clock;
 
     public SessionRevoker(StringRedisTemplate redis,
                           @Value("${application.security.jwt.expiration}") long accessTokenTtlMillis,
-                          @Value("${oj.session.revocation-marker-ttl:25h}") Duration configuredMarkerTtl) {
+                          @Value("${oj.session.revocation-marker-ttl:25h}") Duration configuredMarkerTtl,
+                          Clock clock) {
         this.redis = redis;
+        this.clock = clock;
         // Never shorter than a token it covers can still be accepted, whatever is configured.
         Duration coversEveryCurrentToken = Duration.ofMillis(accessTokenTtlMillis).plus(CLOCK_SKEW);
         this.markerTtl = configuredMarkerTtl.compareTo(coversEveryCurrentToken) > 0
@@ -71,14 +79,19 @@ public class SessionRevoker {
     }
 
     private void revokeNow(List<UUID> ids) {
-        // iat has whole-second precision: a token minted earlier in this very second looks the same as
-        // one minted just after, so the cutoff is the NEXT second and the whole current second is
-        // revoked. (Otherwise a client refreshing in a tight loop would keep a pre-change token.) A
-        // refresh landing in this same second is revoked too; the portal then logs that user out once.
-        String revokedBefore = String.valueOf(Instant.now().getEpochSecond() + 1);
+        // Two cutoffs from the same instant. iat has whole-second precision: a token minted earlier in this very
+        // second looks the same as one minted just after, so the seconds cutoff is the NEXT second and the whole
+        // current second is revoked (otherwise a client refreshing in a tight loop would keep a pre-change token).
+        // It serves tokens without iat_ms and gateways that read only it. The millisecond cutoff is the next
+        // millisecond: a token whose iat_ms is before it is revoked, and a login later in this same second keeps its
+        // token instead of being logged out once.
+        Instant at = clock.instant();
+        String revokedBefore = RevocationCutoffs.secondsMarker(at);
+        String revokedBeforeMillis = RevocationCutoffs.millisMarker(at);
         try {
             for (UUID id : ids) {
                 redis.opsForValue().set(RedisKeys.tokenRevokedBefore(id), revokedBefore, markerTtl);
+                redis.opsForValue().set(RedisKeys.tokenRevokedBeforeMillis(id), revokedBeforeMillis, markerTtl);
             }
         } catch (RuntimeException e) {
             // The change is already committed; failing the request now would only hide that. Tokens

@@ -3,6 +3,7 @@ package vn.thanhtuanle.common.util;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.time.Clock;
 import java.security.MessageDigest;
 import java.util.Base64;
 import java.util.HexFormat;
@@ -62,7 +63,7 @@ class JwtUtilRs256Test {
     }
 
     private static JwtUtil newJwtUtil(KeyPair pair) {
-        JwtUtil util = new JwtUtil();
+        JwtUtil util = new JwtUtil(Clock.systemUTC());
         ReflectionTestUtils.setField(util, "rsaPrivateKeyPem", pemBase64("PRIVATE KEY", pair.getPrivate().getEncoded()));
         ReflectionTestUtils.setField(util, "rsaPublicKeyPem", pemBase64("PUBLIC KEY", pair.getPublic().getEncoded()));
         ReflectionTestUtils.setField(util, "jwtExpiration", 900000L);
@@ -157,7 +158,7 @@ class JwtUtilRs256Test {
 
     @Test
     void missingOrGarbageRsaKeysFailFast() {
-        JwtUtil util = new JwtUtil();
+        JwtUtil util = new JwtUtil(Clock.systemUTC());
         ReflectionTestUtils.setField(util, "rsaPrivateKeyPem", "bm90LWEta2V5");
         ReflectionTestUtils.setField(util, "rsaPublicKeyPem", "bm90LWEta2V5");
         assertThatThrownBy(util::init).isInstanceOf(IllegalStateException.class);
@@ -171,7 +172,7 @@ class JwtUtilRs256Test {
     @Test
     void lineWrappedOuterBase64IsAccepted() throws Exception {
         KeyPair pair = rsaPair();
-        JwtUtil util = new JwtUtil();
+        JwtUtil util = new JwtUtil(Clock.systemUTC());
         ReflectionTestUtils.setField(util, "rsaPrivateKeyPem",
                 pemBase64LineWrapped("PRIVATE KEY", pair.getPrivate().getEncoded()));
         ReflectionTestUtils.setField(util, "rsaPublicKeyPem",
@@ -192,7 +193,7 @@ class JwtUtilRs256Test {
     void mismatchedRsaKeypairFailsAtBoot() throws Exception {
         KeyPair pairA = rsaPair();
         KeyPair pairB = rsaPair();
-        JwtUtil util = new JwtUtil();
+        JwtUtil util = new JwtUtil(Clock.systemUTC());
         ReflectionTestUtils.setField(util, "rsaPrivateKeyPem",
                 pemBase64("PRIVATE KEY", pairA.getPrivate().getEncoded()));
         ReflectionTestUtils.setField(util, "rsaPublicKeyPem",
@@ -216,7 +217,7 @@ class JwtUtilRs256Test {
         String privatePem = pemBase64("PRIVATE KEY", pairA.getPrivate().getEncoded());
         String publicPem = pemBase64("PUBLIC KEY", pairB.getPublic().getEncoded());
 
-        JwtUtil util = new JwtUtil();
+        JwtUtil util = new JwtUtil(Clock.systemUTC());
         ReflectionTestUtils.setField(util, "rsaPrivateKeyPem", privatePem);
         ReflectionTestUtils.setField(util, "rsaPublicKeyPem", publicPem);
         ReflectionTestUtils.setField(util, "jwtExpiration", 900000L);

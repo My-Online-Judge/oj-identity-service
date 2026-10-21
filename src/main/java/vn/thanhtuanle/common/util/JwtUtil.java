@@ -26,6 +26,7 @@ import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
+import java.time.Clock;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HexFormat;
@@ -48,11 +49,18 @@ public class JwtUtil {
     private RSAPublicKey rsaPublicKey;
     private String keyId;
 
+    /** Issue times and expiries count from it ({@code AppConfig.clock()}). */
+    private final Clock clock;
+
     @Value("${application.security.jwt.expiration}")
     private long jwtExpiration;
 
     @Value("${application.security.jwt.refresh-token.expiration}")
     private long refreshExpiration;
+
+    public JwtUtil(Clock clock) {
+        this.clock = clock;
+    }
 
     @PostConstruct
     void init() {
@@ -147,20 +155,26 @@ public class JwtUtil {
 
     /**
      * Self-contained access token: {@code uid} and {@code authorities} let every service authorise
-     * the request from the token alone, with no per-request user lookup.
+     * the request from the token alone, with no per-request user lookup. {@code iat_ms} is its issue time in epoch
+     * milliseconds (the same instant as {@code iat}, which has whole seconds): the gateway compares it with the
+     * millisecond revocation cutoff, so a login later in the same second as a logout keeps its token.
      */
     public String generateToken(User user) {
+        long now = clock.millis();
         Map<String, Object> claims = new HashMap<>();
         claims.put(OjJwtDecoders.UID_CLAIM, user.getId().toString());
         claims.put(OjJwtAuthenticationFilter.AUTHORITIES_CLAIM, new SecurityUserDetails(user).getAuthorities().stream()
                 .map(GrantedAuthority::getAuthority)
                 .sorted()
                 .toList());
-        return buildToken(claims, user, new Date(System.currentTimeMillis() + jwtExpiration));
+        claims.put(OjJwtDecoders.IAT_MS_CLAIM, now);
+        return buildToken(claims, user, now, now + jwtExpiration);
     }
 
+    /** No {@code iat_ms}: the gateway never checks a refresh token against the revocation cutoffs. */
     public String generateRefreshToken(User userDetails) {
-        return buildToken(new HashMap<>(), userDetails, new Date(System.currentTimeMillis() + refreshExpiration));
+        long now = clock.millis();
+        return buildToken(new HashMap<>(), userDetails, now, now + refreshExpiration);
     }
 
     /**
@@ -168,19 +182,22 @@ public class JwtUtil {
      * presented token's expiry), whichever is sooner, so a session ends one refresh TTL after its login.
      */
     public String generateRefreshToken(User user, Date notAfter) {
-        long expiry = Math.min(System.currentTimeMillis() + refreshExpiration, notAfter.getTime());
-        return buildToken(new HashMap<>(), user, new Date(expiry));
+        long now = clock.millis();
+        long expiry = Math.min(now + refreshExpiration, notAfter.getTime());
+        return buildToken(new HashMap<>(), user, now, expiry);
     }
 
-    private String buildToken(Map<String, Object> extractClaims, User user, Date expiration) {
+    /** {@code issuedAtMillis} is read once per token, so {@code iat}, {@code iat_ms} and {@code exp} agree. */
+    private String buildToken(Map<String, Object> extractClaims, User user, long issuedAtMillis, long expiresAtMillis) {
         return Jwts
                 .builder()
                 .setHeaderParam(JwsHeader.KEY_ID, keyId)
                 .setClaims(extractClaims)
                 .setId(UUID.randomUUID().toString())
                 .setSubject(user.getUsername())
-                .setIssuedAt(new Date(System.currentTimeMillis()))
-                .setExpiration(expiration)
+                // jjwt writes whole seconds.
+                .setIssuedAt(new Date(issuedAtMillis))
+                .setExpiration(new Date(expiresAtMillis))
                 .signWith(rsaPrivateKey, SignatureAlgorithm.RS256)
                 .compact();
     }

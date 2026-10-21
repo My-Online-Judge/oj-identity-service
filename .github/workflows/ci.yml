@@ -8,7 +8,7 @@ permissions:
 env:
   # oj-common is not published to a Maven repository yet. The job checks this tag out next to the
   # service (the same sibling layout the Dockerfile and judge-deployment use) and installs it.
-  oj-common-ref: v0.8.0
+  oj-common-ref: v0.8.1
   IMAGE: ghcr.io/my-online-judge/oj-identity-service
 jobs:
   verify:
