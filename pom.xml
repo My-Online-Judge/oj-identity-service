@@ -51,6 +51,13 @@
 			<artifactId>spring-boot-starter-web</artifactId>
 		</dependency>
 
+		<!-- Bean Validation (@Valid on the controllers' request bodies). Declared here rather than left to arrive through
+		     springdoc-openapi-starter-common, which happens to depend on it: without a provider every DTO constraint is silent. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-validation</artifactId>
+		</dependency>
+
 		<!-- Swagger -->
 		<dependency>
 			<groupId>org.springdoc</groupId>

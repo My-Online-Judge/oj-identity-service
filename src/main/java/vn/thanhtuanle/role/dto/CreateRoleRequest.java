@@ -4,8 +4,8 @@ import lombok.Data;
 
 @Data
 public class CreateRoleRequest {
-    // Validated in RoleService — the app has no Bean Validation provider on the
-    // classpath, so annotations here would be no-ops.
+    // Validated by hand in RoleService, so a violation answers with the role's own error codes. (Bean Validation is
+    // on the classpath: the controllers' @Valid bodies, LoginRequest for one, are checked by it.)
     private String name;
     private String description;
 }
