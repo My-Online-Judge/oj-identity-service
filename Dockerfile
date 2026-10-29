@@ -1,5 +1,6 @@
 # Build stage. Debian-based, not Alpine: oj-common generates its gRPC stubs with protoc, a glibc binary.
-FROM maven:3.9-eclipse-temurin-17 AS builder
+# The jar is the same on every CPU, so the build runs natively on the CI host (BUILDPLATFORM); only the run stage is per platform.
+FROM --platform=$BUILDPLATFORM maven:3.9-eclipse-temurin-17 AS builder
 # oj-common is a sibling repo that is not published yet: compile it into this build's local Maven
 # repository first. Compose passes it as the named build context "oj-common" (additional_contexts).
 COPY --from=oj-common . /oj-common
@@ -10,7 +11,9 @@ RUN mvn dependency:go-offline
 COPY src ./src
 RUN mvn clean package -DskipTests
 # Run stage
-FROM eclipse-temurin:17-jre-alpine
+# Run stage: a JRE 17 on Alpine that exists for amd64 and arm64 (eclipse-temurin:17-jre-alpine has no arm64 variant), so one tag runs on the
+# server and on an Apple-silicon laptop.
+FROM bellsoft/liberica-openjre-alpine:17
 WORKDIR /app
 # curl: the compose healthcheck calls the actuator over mutual TLS, presenting this service's certificate
 # (busybox wget cannot send a client certificate).
