@@ -13,7 +13,7 @@ RUN mvn clean package -DskipTests
 # Run stage
 # Run stage: a JRE 17 on Alpine that exists for amd64 and arm64 (eclipse-temurin:17-jre-alpine has no arm64 variant), so one tag runs on the
 # server and on an Apple-silicon laptop.
-FROM bellsoft/liberica-openjre-alpine:17
+FROM bellsoft/liberica-openjre-alpine:27
 WORKDIR /app
 # curl: the compose healthcheck calls the actuator over mutual TLS, presenting this service's certificate
 # (busybox wget cannot send a client certificate).
